@@ -5,21 +5,25 @@ struct SearchView: View {
     @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var query = ""
     var body: some View {
-        Group {
+        let matchedSongs = songs
+        return Group {
             if query.isEmpty { EmptyLibraryView(symbol: "magnifyingglass", title: "Find your music", detail: "Search songs, artists, albums and playlists on your device.") }
             else {
                 List {
-                    Section("Songs") { ForEach(songs) { track in SongRow(track: track) { playback.play(songs, startingAt: track) } } }
+                    Section("Songs") { ForEach(matchedSongs) { track in SongRow(track: track) { playback.play(matchedSongs, startingAt: track) } } }
                     Section("Albums") { ForEach(library.browse.albums.filter { matches($0.title) || matches($0.artist) }) { album in NavigationLink(album.title) { AlbumDetailView(album: album) } } }
                     Section("Artists") { ForEach(library.browse.artistNames.filter(matches), id: \.self) { artist in NavigationLink(artist) { SongListView(title: artist, tracks: library.browse.artists[artist] ?? [], artist: artist) } } }
                     Section("Playlists") { ForEach(library.playlists.filter { matches($0.name) }) { playlist in NavigationLink(playlist.name) { PlaylistDetailView(id: playlist.id) } } }
-                    if songs.isEmpty { Text("No matching songs").foregroundColor(.secondary) }
+                    if matchedSongs.isEmpty { Text("No matching songs").foregroundColor(.secondary) }
                 }.listStyle(.plain).subtleSeparator().miniPlayerClearance()
             }
         }.navigationTitle("Search").searchable(text: $query, prompt: "Songs, artists, albums")
     }
     private func matches(_ value: String) -> Bool { value.localizedCaseInsensitiveContains(query) }
-    private var songs: [Track] { library.sortedTracks.filter { matches($0.title) || matches($0.artist) || matches($0.album) } }
+    private var songs: [Track] {
+        guard !query.isEmpty else { return [] }
+        return library.sortedTracks.filter { matches($0.title) || matches($0.artist) || matches($0.album) }
+    }
 }
 
 struct PlaylistsView: View {
@@ -86,7 +90,7 @@ struct PlaylistDetailView: View {
                     ArtworkView(track: track).frame(width: 40, height: 40)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(track.title).font(.callout).foregroundColor(.primary).lineLimit(1)
-                        Text(track.artist).font(.footnote).foregroundColor(.secondary).lineLimit(1)
+                        Text(track.displayArtist).font(.footnote).foregroundColor(.secondary).lineLimit(1)
                     }
                     Spacer()
                     let added = playlist?.trackIDs.contains(track.id) ?? false
@@ -179,7 +183,7 @@ struct AddToPlaylistView: View {
                 Section {
                     HStack(spacing: 12) {
                         ArtworkView(track: track).frame(width: 48, height: 48)
-                        VStack(alignment: .leading) { Text(track.title).font(.headline); Text(track.artist).font(.subheadline).foregroundColor(.secondary) }
+                        VStack(alignment: .leading) { Text(track.title).font(.headline); Text(track.displayArtist).font(.subheadline).foregroundColor(.secondary) }
                     }
                 }
                 Section("Playlists") {

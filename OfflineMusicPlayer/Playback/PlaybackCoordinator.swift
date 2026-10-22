@@ -175,7 +175,7 @@ final class PlaybackCoordinator: ObservableObject {
         widgetTask?.cancel()
         widgetTask = Task {
             do {
-                let changed = try await WidgetSnapshotStore.shared.publish(title: track?.title ?? "", artist: track?.artist ?? "", artwork: artworkURL, force: forceReload)
+                let changed = try await WidgetSnapshotStore.shared.publish(title: track?.title ?? "", artist: track?.displayArtist ?? "", artwork: artworkURL, force: forceReload)
                 guard !Task.isCancelled else { return }
                 if changed || forceReload { WidgetCenter.shared.reloadTimelines(ofKind: CassetteWidgetConfiguration.kind) }
                 #if targetEnvironment(macCatalyst)
@@ -341,7 +341,7 @@ final class PlaybackCoordinator: ObservableObject {
     }
     private func updateNowPlaying() {
         guard let track = currentTrack else { return }
-        var info: [String: Any] = [MPMediaItemPropertyTitle: track.title, MPMediaItemPropertyArtist: track.artist,
+        var info: [String: Any] = [MPMediaItemPropertyTitle: track.title, MPMediaItemPropertyArtist: track.displayArtist,
             MPMediaItemPropertyAlbumTitle: track.album, MPMediaItemPropertyPlaybackDuration: duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: position, MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0]
         if let artwork = artwork { info[MPMediaItemPropertyArtwork] = artwork }

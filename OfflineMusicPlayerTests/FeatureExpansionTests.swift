@@ -144,7 +144,7 @@ final class FeatureExpansionTests: XCTestCase {
     @MainActor
     func testSyncedLyricsCompactRender() async throws {
         let lines = LRCParser.parse((0..<15).map { "[00:\(String(format: "%02d", $0))]Line \($0 + 1) of local lyrics" }.joined(separator: "\n"))
-        let host = UIHostingController(rootView: SyncedLyricsView(lines: lines, position: 8, seek: { _ in }))
+        let host = UIHostingController(rootView: SyncedLyricsView(lines: lines, position: 8, seek: { _ in }).ignoresSafeArea())
         host.overrideUserInterfaceStyle = .dark
         let bounds = CGRect(x: 0, y: 0, width: 272, height: 200)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -159,6 +159,21 @@ final class FeatureExpansionTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
         host.view.layoutIfNeeded()
         let rendered = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in host.view.drawHierarchy(in: bounds, afterScreenUpdates: true) }
-        try XCTUnwrap(rendered.pngData()).write(to: URL(fileURLWithPath: "/tmp/Cassette-synced-lyrics.png"))
+        let pngData = try XCTUnwrap(rendered.pngData())
+        try pngData.write(to: URL(fileURLWithPath: "/tmp/Cassette-synced-lyrics.png"))
+        if let cgImage = UIImage(data: pngData)?.cgImage, let data = cgImage.dataProvider?.data, let bytes = CFDataGetBytePtr(data) {
+            let bpp = cgImage.bitsPerPixel / 8
+            let bpr = cgImage.bytesPerRow
+            let bgLevel = Int(bytes[0])
+            // The very top and very bottom scanlines (y = 0..2, y = 197..199) are at the 0-alpha ends of LyricsEdgeFadeMask,
+            // so any scrolled lyric content at those borders must blend completely into the container background.
+            for edgeY in [0, 1, 2, 197, 198, 199] {
+                for x in 0..<240 {
+                    let offset = edgeY * bpr + x * bpp
+                    let level = Int(bytes[offset])
+                    XCTAssertLessThanOrEqual(abs(level - bgLevel), 2, "Lyrics edge pixel at (\(x), \(edgeY)) should be fully faded into background")
+                }
+            }
+        }
     }
 }

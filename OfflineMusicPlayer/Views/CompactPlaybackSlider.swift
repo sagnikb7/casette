@@ -11,6 +11,16 @@ struct CompactPlaybackSlider: UIViewRepresentable {
         let slider = ScrubbingSlider()
         slider.setThumbImage(Self.thumb, for: .normal)
         slider.setThumbImage(Self.thumb, for: .highlighted)
+        slider.minimumTrackTintColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor.white.withAlphaComponent(0.88)
+                : UIColor.black.withAlphaComponent(0.75)
+        }
+        slider.maximumTrackTintColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor.white.withAlphaComponent(0.22)
+                : UIColor.black.withAlphaComponent(0.18)
+        }
         slider.accessibilityLabel = "Playback position"
         slider.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .valueChanged)
         slider.addTarget(context.coordinator, action: #selector(Coordinator.started), for: .touchDown)
@@ -25,8 +35,13 @@ struct CompactPlaybackSlider: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     private static let thumb: UIImage = {
         let format = UIGraphicsImageRendererFormat(); format.opaque = false
-        return UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24), format: format).image { _ in
-            UIColor.white.setFill(); UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 24, height: 24)).fill()
+        return UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24), format: format).image { ctx in
+            let rect = CGRect(x: 2, y: 2, width: 20, height: 20)
+            ctx.cgContext.saveGState()
+            ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 1), blur: 2.5, color: UIColor.black.withAlphaComponent(0.28).cgColor)
+            UIColor.white.setFill()
+            UIBezierPath(ovalIn: rect).fill()
+            ctx.cgContext.restoreGState()
         }
     }()
     final class Coordinator: NSObject {

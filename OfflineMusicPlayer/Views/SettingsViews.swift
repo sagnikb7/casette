@@ -99,16 +99,17 @@ struct AppearanceSettingsView: View {
 struct LibraryStatisticsView: View {
     @EnvironmentObject private var library: LibraryStore
     var body: some View {
-        List {
+        let visible = library.visibleTracks
+        return List {
             Section("Music") {
-                LabeledContentRow(label: "Songs", value: "\(library.visibleTracks.count)")
-                LabeledContentRow(label: "Available", value: "\(library.visibleTracks.filter(\.available).count)")
-                LabeledContentRow(label: "Albums", value: "\(AlbumGroup.make(library.visibleTracks).count)")
-                LabeledContentRow(label: "Artists", value: "\(Set(library.visibleTracks.map(\.artist)).count)")
+                LabeledContentRow(label: "Songs", value: "\(visible.count)")
+                LabeledContentRow(label: "Available", value: "\(visible.filter(\.available).count)")
+                LabeledContentRow(label: "Albums", value: "\(library.browse.albums.count)")
+                LabeledContentRow(label: "Artists", value: "\(library.browse.artistNames.count)")
                 LabeledContentRow(label: "Listening Time", value: listeningTime)
             }
             Section("Your Library") {
-                LabeledContentRow(label: "Favorites", value: "\(library.visibleTracks.filter(\.favorite).count)")
+                LabeledContentRow(label: "Favorites", value: "\(visible.filter(\.favorite).count)")
                 LabeledContentRow(label: "Playlists", value: "\(library.playlists.count)")
                 LabeledContentRow(label: "Enabled Folders", value: "\(library.sources.filter(\.enabled).count)")
             }

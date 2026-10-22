@@ -192,4 +192,51 @@ final class FolderPlayerRefinementTests: XCTestCase {
         XCTAssertEqual(position, 33)
         XCTAssertEqual(editingEvents, [false])
     }
+
+    @MainActor
+    func testOwnedSubfolderSelectionAndDisconnectedDuplicateSuppression() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let owned = root.appendingPathComponent("App")
+        let ownedMusic = owned.appendingPathComponent("Music")
+        let externalMusic = root.appendingPathComponent("OnMyIPod/Music")
+        try FileManager.default.createDirectory(at: ownedMusic, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: externalMusic, withIntermediateDirectories: true)
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "TestTone", withExtension: "wav"))
+        try FileManager.default.copyItem(at: fixture, to: ownedMusic.appendingPathComponent("Track1.wav"))
+        try FileManager.default.copyItem(at: fixture, to: externalMusic.appendingPathComponent("Track1.wav"))
+
+        let library = LibraryStore(documents: owned, inMemory: true)
+        // Selecting a "Music" subfolder inside Cassette's own Documents container must reuse the owned source, not add an external duplicate.
+        library.addFolder(ownedMusic)
+        try await waitForScan(library)
+        XCTAssertEqual(library.sources.count, 1)
+        XCTAssertTrue(library.sources[0].isOwned)
+        XCTAssertEqual(library.visibleTracks.count, 1)
+
+        // Add the external "OnMyIPod/Music" folder with the same song copy.
+        library.addFolder(externalMusic)
+        try await waitForScan(library)
+        XCTAssertEqual(library.sources.count, 2)
+        let externalSource = try XCTUnwrap(library.sources.first { !$0.isOwned })
+
+        // Simulate the external folder becoming unavailable / needing reconnect (e.g., moved or stale bookmark).
+        try FileManager.default.removeItem(at: externalMusic)
+        library.rescan(only: externalSource.id)
+        try await waitForScan(library)
+        XCTAssertEqual(library.sources.first { $0.id == externalSource.id }?.needsReconnect, true)
+
+        // Because the same song is still available in Cassette's owned folder, visibleTracks must NOT show a duplicate "Unavailable · reconnect folder" row.
+        XCTAssertEqual(library.visibleTracks.count, 1)
+        XCTAssertTrue(library.visibleTracks.allSatisfy(\.available))
+
+        // Re-creating and re-adding the external "Music" folder without tapping "Reconnect" reuses the disconnected source ID instead of creating a third source.
+        try FileManager.default.createDirectory(at: externalMusic, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: fixture, to: externalMusic.appendingPathComponent("Track1.wav"))
+        library.addFolder(externalMusic)
+        try await waitForScan(library)
+        XCTAssertEqual(library.sources.filter { !$0.isOwned }.count, 1)
+        XCTAssertEqual(library.sources.first { !$0.isOwned }?.id, externalSource.id)
+        XCTAssertEqual(library.sources.first { !$0.isOwned }?.needsReconnect, false)
+    }
 }

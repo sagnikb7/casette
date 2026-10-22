@@ -4,10 +4,10 @@ import Combine
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var tracks: [Track] = [] {
-        didSet { trackLookup = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) }); visibleCache = nil; sortedCache = nil; browseCache = nil }
+        didSet { trackLookup = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) }); visibleCache = nil; sortedCache = nil; browseCache = nil; historyCache = nil }
     }
-    @Published private(set) var sources: [MusicSource] = [] { didSet { visibleCache = nil; sortedCache = nil; browseCache = nil } }
-    @Published private(set) var playbackHistory: [PlaybackHistoryEntry] = []
+    @Published private(set) var sources: [MusicSource] = [] { didSet { visibleCache = nil; sortedCache = nil; browseCache = nil; historyCache = nil } }
+    @Published private(set) var playbackHistory: [PlaybackHistoryEntry] = [] { didSet { historyCache = nil } }
     @Published private(set) var playlists: [MusicPlaylist] = []
     @Published private(set) var scanning = false
     @Published private(set) var clearingArtwork = false
@@ -25,6 +25,7 @@ final class LibraryStore: ObservableObject {
     private var visibleCache: [Track]?
     private var sortedCache: [Track]?
     private var browseCache: BrowseIndex?
+    private var historyCache: [PlayedSong]?
     private var artworkNeedsTrim = false
     private var lastScan = Date.distantPast
     private var checkpoints: [UUID: ScanCheckpoint] = [:]
@@ -89,7 +90,11 @@ final class LibraryStore: ObservableObject {
     var visibleTracks: [Track] {
         if let cached = visibleCache { return cached }
         let roots = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
-        let result = tracks.filter { track in track.locations.contains { roots[$0.sourceID]?.permits($0.relativePath) ?? false } }
+        let permitted = tracks.filter { track in track.locations.contains { roots[$0.sourceID]?.permits($0.relativePath) ?? false } }
+        let availableKeys = Set(permitted.filter(\.available).map { "\($0.title.lowercased())|\($0.artist.lowercased())|\($0.album.lowercased())|\($0.fingerprint)" })
+        let result = permitted.filter { track in
+            track.available || !availableKeys.contains("\(track.title.lowercased())|\(track.artist.lowercased())|\(track.album.lowercased())|\(track.fingerprint)")
+        }
         visibleCache = result; return result
     }
     var sortedTracks: [Track] {
@@ -98,12 +103,15 @@ final class LibraryStore: ObservableObject {
         sortedCache = result; return result
     }
     var historySongs: [PlayedSong] {
+        if let cached = historyCache { return cached }
         let visible = Dictionary(uniqueKeysWithValues: visibleTracks.map { ($0.id, $0) })
         var seen = Set<String>()
-        return playbackHistory.compactMap { entry in
+        let result = playbackHistory.compactMap { entry -> PlayedSong? in
             guard seen.insert(entry.trackID).inserted else { return nil }
             return visible[entry.trackID].map { PlayedSong(entry: entry, track: $0) }
         }
+        historyCache = result
+        return result
     }
     var recentlyPlayed: [PlayedSong] { Array(historySongs.prefix(10)) }
 
@@ -120,11 +128,18 @@ final class LibraryStore: ObservableObject {
     func track(_ id: String) -> Track? { trackLookup[id] }
     func sourceURL(_ source: MusicSource) throws -> URL {
         if source.isOwned { return documents }
-        if let cached = resolvedRoots[source.id] { return cached }
-        guard let bookmark = source.bookmark else { throw CocoaError(.fileReadNoPermission) }
+        if let grant = firstScanGrants[source.id] { return grant.url }
+        guard let bookmark = source.bookmark else {
+            if let cached = resolvedRoots[source.id] { return cached }
+            throw CocoaError(.fileReadNoPermission)
+        }
         var stale = false
         let url = try URL(resolvingBookmarkData: bookmark, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
-        // Check readability only after the caller starts security-scoped access.
+        // If iOS marks the security-scoped bookmark stale while access is active, refresh the saved bookmark data.
+        if stale, let refreshed = try? url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) {
+            var updated = source; updated.bookmark = refreshed
+            update(updated); try? save(updated)
+        }
         resolvedRoots[source.id] = url
         return url
     }
@@ -132,22 +147,56 @@ final class LibraryStore: ObservableObject {
         let grant = FolderAccess(url)
         do {
             try LocalFilePolicy.check(url)
-            guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw CocoaError(.fileReadInvalidFileName) }
+            var coordinationError: NSError?, isDir = false
+            var coordinatedFolder = url
+            NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { coordinated in
+                coordinatedFolder = coordinated
+                isDir = (try? coordinated.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }
+            if let error = coordinationError { throw error }
+            guard isDir else { throw CocoaError(.fileReadInvalidFileName) }
             if let id = reconnecting, sources.first(where: { $0.id == id })?.isOwned != false {
                 throw CocoaError(.fileReadNoPermission)
             }
-            let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+            let canonical = coordinatedFolder.resolvingSymlinksInPath().standardizedFileURL
+            let ownedRoot = documents.resolvingSymlinksInPath().standardizedFileURL
+            // Selecting Cassette's own folder or a subfolder inside it (such as On My iPod → Cassette → Music)
+            // does not need a separate external source that could duplicate tracks or request reconnection.
+            if reconnecting == nil, (canonical == ownedRoot || canonical.path.hasPrefix(ownedRoot.path + "/")),
+               let owned = sources.first(where: { $0.isOwned }) {
+                rescan(only: owned.id)
+                return
+            }
             let queued = folderChanges.reversed().compactMap { change -> MusicSource? in
                 if case .add(let source, let grant) = change, grant.url.resolvingSymlinksInPath().standardizedFileURL == canonical { return source }
                 return nil
             }.first
-            let duplicate = queued ?? sources.first { (try? sourceURL($0).resolvingSymlinksInPath().standardizedFileURL) == canonical }
+            let duplicate = queued ?? sources.first { existing in
+                if let existingPath = try? sourceURL(existing).resolvingSymlinksInPath().standardizedFileURL {
+                    return existingPath == canonical
+                }
+                // If an existing external folder with the same name is waiting for reconnect because its old bookmark expired,
+                // reuse that source identity instead of creating a second folder and duplicating every song.
+                return !existing.isOwned && existing.needsReconnect && existing.name == url.lastPathComponent
+            }
+            let duplicateSamePathIDs = sources.filter { existing in
+                guard !existing.isOwned else { return false }
+                if let existingPath = try? sourceURL(existing).resolvingSymlinksInPath().standardizedFileURL {
+                    return existingPath == canonical
+                }
+                return existing.needsReconnect && existing.name == url.lastPathComponent
+            }.map(\.id)
             if let duplicate = duplicate, duplicate.isOwned { rescan(only: duplicate.id); return }
             if let duplicate = duplicate, let id = reconnecting, duplicate.id != id {
                 errorMessage = "This folder is already in your library."; return
             }
-            let data = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
-            var source = MusicSource(id: reconnecting ?? duplicate?.id ?? UUID(), name: url.lastPathComponent, bookmark: data, isOwned: false)
+            let targetID = reconnecting ?? duplicate?.id ?? UUID()
+            for extraID in duplicateSamePathIDs where extraID != targetID {
+                queueFolderChange(.remove(extraID))
+            }
+            let data = try (try? coordinatedFolder.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil))
+                ?? url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+            var source = MusicSource(id: targetID, name: url.lastPathComponent, bookmark: data, isOwned: false)
             if let old = sources.first(where: { $0.id == source.id }) { source.enabled = old.enabled; source.excludedPaths = old.excludedPaths }
             queueFolderChange(.add(source, grant))
         } catch { errorMessage = "Couldn't add \(url.lastPathComponent): \(error.localizedDescription) Choose the folder again in Files. For cloud storage, download the audio first." }
@@ -317,7 +366,8 @@ final class LibraryStore: ObservableObject {
                 scanStatus = "Scanning \(source.name)"
                 do {
                     let root = try sourceURL(source)
-                    let access = root.startAccessingSecurityScopedResource()
+                    let holdingFirstGrant = firstScanGrants[source.id] != nil
+                    let access = holdingFirstGrant ? false : root.startAccessingSecurityScopedResource()
                     defer { if access { root.stopAccessingSecurityScopedResource() } }
                     let snapshot = trackLookup
                     let completedCount = scannedCount

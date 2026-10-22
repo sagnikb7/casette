@@ -16,7 +16,8 @@ struct ScanResult {
 enum LocalFilePolicy {
     static func musicFile(_ relativePath: String, in root: URL) throws -> URL {
         let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL
-        let file = canonicalRoot.appendingPathComponent(relativePath).standardizedFileURL
+        // Derive the file URL from `root` directly so any security-scoped sandbox extension attached to `root` is inherited.
+        let file = root.appendingPathComponent(relativePath)
         let resolved = file.resolvingSymlinksInPath().standardizedFileURL
         guard !relativePath.hasPrefix("/"), resolved.path.hasPrefix(canonicalRoot.path + "/") else {
             throw CocoaError(.fileReadNoPermission)
@@ -44,8 +45,7 @@ struct DirectoryStamp: Codable, Equatable {
     var modified: Date
     var identity: String
     static func read(root: URL, path: String) throws -> DirectoryStamp {
-        let canonical = root.resolvingSymlinksInPath().standardizedFileURL
-        let url = path.isEmpty ? canonical : try LocalFilePolicy.musicFile(path, in: canonical)
+        let url = path.isEmpty ? root : try LocalFilePolicy.musicFile(path, in: root)
         let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey, .fileResourceIdentifierKey])
         guard values.isDirectory == true, values.isSymbolicLink != true,
               let modified = values.contentModificationDate, let identity = values.fileResourceIdentifier else { throw CocoaError(.fileReadUnknown) }
@@ -72,22 +72,26 @@ actor LibraryScanner {
     func scan(root: URL, sourceID: UUID, existing: [String: Track], cache: URL, excluded: [String] = [],
               checked: @escaping @Sendable (Int) async -> Void = { _ in },
               progress: @escaping @Sendable ([Track], Int) async -> Void) async throws -> ScanResult {
-        let scanRoot = root.resolvingSymlinksInPath().standardizedFileURL
         try LocalFilePolicy.check(root)
-        let rootStamp = try? DirectoryStamp.read(root: scanRoot, path: "")
-        var directories = rootStamp.map { [$0] } ?? []
-        var directoryCheckReliable = rootStamp != nil
-        // POSIX isReadableFile can reject provider-backed folders before coordination.
-        // Ask the provider for a directory read while the selected security scope is held.
+        // POSIX isReadableFile and uncoordinated URLs can reject provider-backed folders (like On My iPod → Music).
+        // Coordinate directory access while the selected security scope is held, and enumerate using the coordinated URL
+        // so child file URLs inherit the active security-scoped sandbox token on iOS.
         var coordinationError: NSError?, directoryError: Error?
+        var activeRoot = root
         NSFileCoordinator().coordinate(readingItemAt: root, options: .withoutChanges, error: &coordinationError) { coordinatedRoot in
-            do { _ = try FileManager.default.contentsOfDirectory(at: coordinatedRoot, includingPropertiesForKeys: nil) }
-            catch { directoryError = error }
+            do {
+                _ = try FileManager.default.contentsOfDirectory(at: coordinatedRoot, includingPropertiesForKeys: nil)
+                activeRoot = coordinatedRoot
+            } catch { directoryError = error }
         }
         if let error = coordinationError ?? (directoryError as NSError?) { throw error }
+        let scanRoot = activeRoot.resolvingSymlinksInPath().standardizedFileURL
+        let rootStamp = try? DirectoryStamp.read(root: activeRoot, path: "")
+        var directories = rootStamp.map { [$0] } ?? []
+        var directoryCheckReliable = rootStamp != nil
         var issues: [String] = []
         var complete = true
-        guard let enumerator = FileManager.default.enumerator(at: scanRoot,
+        guard let enumerator = FileManager.default.enumerator(at: activeRoot,
             includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileResourceIdentifierKey, .volumeIdentifierKey, .fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, error in
                 complete = false
@@ -100,12 +104,12 @@ actor LibraryScanner {
             try Task.checkCancellation()
             let previousCount = count
             do {
-                let relativePath = String(file.resolvingSymlinksInPath().path.dropFirst(scanRoot.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                let relativePath = Self.relativePath(of: file, under: activeRoot, canonicalRoot: scanRoot)
                 if excluded.contains(where: { relativePath == $0 || relativePath.hasPrefix($0 + "/") }) { enumerator.skipDescendants(); continue }
                 let attributes = try file.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileResourceIdentifierKey, .volumeIdentifierKey, .fileSizeKey, .contentModificationDateKey])
                 if attributes.isSymbolicLink == true { enumerator.skipDescendants(); continue }
                 if attributes.isDirectory == true {
-                    if let stamp = try? DirectoryStamp.read(root: scanRoot, path: relativePath) { directories.append(stamp) }
+                    if let stamp = try? DirectoryStamp.read(root: activeRoot, path: relativePath) { directories.append(stamp) }
                     else { directoryCheckReliable = false }
                     continue
                 }
@@ -129,11 +133,8 @@ actor LibraryScanner {
                 guard Self.extensions.contains(file.pathExtension.lowercased()) else { continue }
                 count += 1
                 try LocalFilePolicy.check(file)
-                let relative = String(file.resolvingSymlinksInPath().path.dropFirst(scanRoot.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                let identity: String
-                if let fid = attributes.fileResourceIdentifier, let volume = attributes.volumeIdentifier {
-                    identity = "\(volume):\(fid)"
-                } else { identity = file.standardizedFileURL.path }
+                let relative = relativePath
+                let identity = Self.trackIdentity(for: file, attributes: attributes, sourceID: sourceID, relativePath: relative, existing: existing)
                 var fingerprint = "\(attributes.fileSize ?? 0):\(attributes.contentModificationDate?.timeIntervalSince1970 ?? 0)"
                 let sidecar = file.deletingPathExtension().appendingPathExtension("lrc")
                 if let lyricAttributes = try? sidecar.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
@@ -161,6 +162,36 @@ actor LibraryScanner {
         if !batch.isEmpty { await progress(batch, count) }
         await checked(count)
         return ScanResult(tracks: tracks, seen: seen, skipped: skipped, issues: issues, playlists: playlists, complete: complete, directories: directories, directoryCheckReliable: directoryCheckReliable)
+    }
+
+    private static func relativePath(of file: URL, under root: URL, canonicalRoot: URL) -> String {
+        let resolvedFile = file.resolvingSymlinksInPath().standardizedFileURL.path
+        if resolvedFile.hasPrefix(canonicalRoot.path + "/") {
+            return String(resolvedFile.dropFirst(canonicalRoot.path.count + 1))
+        }
+        let standardRoot = root.standardizedFileURL.path
+        let standardFile = file.standardizedFileURL.path
+        if standardFile.hasPrefix(standardRoot + "/") {
+            return String(standardFile.dropFirst(standardRoot.count + 1))
+        }
+        return String(resolvedFile.dropFirst(canonicalRoot.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// Reuses an existing track identity for the same `(sourceID, relativePath)` if a File Provider rotated its transient resource identifier,
+    /// and collapses duplicate copies when the exact same audio bytes exist in both Cassette's folder and a selected folder.
+    private static func trackIdentity(for file: URL, attributes: URLResourceValues, sourceID: UUID, relativePath: String, existing: [String: Track]) -> String {
+        let hardwareID: String
+        if let fid = attributes.fileResourceIdentifier, let volume = attributes.volumeIdentifier {
+            hardwareID = "\(volume):\(fid)"
+        } else {
+            hardwareID = file.resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        if existing[hardwareID] != nil { return hardwareID }
+        // If this exact (sourceID, relativePath) was previously indexed under an older provider resource ID, preserve its identity instead of creating a duplicate row.
+        if let match = existing.values.first(where: { $0.locations.contains(where: { $0.sourceID == sourceID && $0.relativePath == relativePath }) }) {
+            return match.id
+        }
+        return hardwareID
     }
 
     private func metadata(_ url: URL, id: String, fingerprint: String, cache: URL) async throws -> Track {
@@ -219,7 +250,11 @@ actor LibraryScanner {
             }
         }
         func value(_ key: AVMetadataKey) -> String? {
-            items.first { $0.commonKey == key }?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let values = items
+                .filter { $0.commonKey == key }
+                .compactMap { $0.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return values.isEmpty ? nil : values.joined(separator: "; ")
         }
         func tag(_ fragments: [String]) -> String? {
             items.first { item in fragments.contains { (item.identifier?.rawValue ?? String(describing: item.key)).localizedCaseInsensitiveContains($0) } }?.stringValue

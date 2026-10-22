@@ -186,11 +186,20 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(library.track(song.id)?.favorite ?? false)
         library.includeFolder(owned.id, path: "Podcasts"); try await waitForScan(library)
         XCTAssertEqual(library.visibleTracks.count, 2)
-        library.addFolder(blocked); try await waitForScan(library)
+        // A genuinely external folder (outside Cassette's own Documents container) becomes its own
+        // removable source; a subfolder of the owned root would instead reuse the owned source (see
+        // FolderPlayerRefinementTests.testOwnedSubfolderSelectionAndDisconnectedDuplicateSuppression).
+        let externalFolder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: externalFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: externalFolder) }
+        try FileManager.default.copyItem(at: fixture, to: externalFolder.appendingPathComponent("Extra.wav"))
+        library.addFolder(externalFolder); try await waitForScan(library)
         let external = try XCTUnwrap(library.sources.first { !$0.isOwned })
-        XCTAssertEqual(library.tracks.first { $0.title == "Talk" }?.locations.count, 2)
+        XCTAssertEqual(library.tracks.first { $0.title == "Extra" }?.locations.count, 1)
+        XCTAssertEqual(library.visibleTracks.count, 3)
         library.removeSource(external)
-        XCTAssertEqual(library.tracks.first { $0.title == "Talk" }?.locations.count, 1)
+        XCTAssertEqual(library.tracks.first { $0.title == "Extra" }?.locations.count, 0, "Removing the only source for a track drops its locations")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: externalFolder.appendingPathComponent("Extra.wav").path), "Removing a source must not delete the underlying file")
         XCTAssertEqual(library.visibleTracks.count, 2)
         library.setEnabled(owned.id, enabled: false); XCTAssertTrue(library.visibleTracks.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: blocked.appendingPathComponent("Talk.wav").path))

@@ -24,7 +24,7 @@ Every create build request returns an unsigned Release IPA plus a ZIP containing
 
 ## Artist-image exception to the original offline specification
 
-On 12 October 2026 the user explicitly requested a free trusted artist-image API. Music, album art and lyrics remain local; artist photos may use public Wikimedia endpoints. Photos are enabled by default, fetched on demand for artist rows and cached with creator/license/source attribution. Artist names and normal network information are sent; audio and local paths are not uploaded. The switch stops new lookups but allows cached photos. Exact-name musical matches must be unique; ambiguous/missing/network-failed results use placeholders. This request supersedes the original spec’s prohibition on network enrichment for artist photos only.
+On 12 October 2026 the user explicitly requested a free trusted artist-image API, and on 14 October 2026 expanded it to fetch 600×600 artist artwork from the iTunes Search API plus lazy-loaded artist metadata (origin, active years, type, tags, and description) from MusicBrainz, with Wikimedia Commons retained as a fallback. Music, album art and lyrics remain local; artist photos and metadata are enabled by default, fetched on demand with per-service rate limiting, and cached offline with attribution. Artist names and normal network information are sent; audio and local paths are not uploaded. The switch stops new lookups but allows cached photos and descriptions. Ambiguous/missing/network-failed results use placeholders. This request supersedes the original spec’s prohibition on network enrichment for artist photos and artist descriptions only.
 
 ## Cassette rebrand and widgets
 

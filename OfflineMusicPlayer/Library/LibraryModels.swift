@@ -55,6 +55,30 @@ struct Track: Identifiable, Codable, Equatable {
     }
     var available: Bool { locations.contains { $0.available } }
     var albumKey: String { albumArtist + "\u{1f}" + album }
+
+    /// Splits semicolon- or null-separated artist tags (e.g. "Artist A; Artist B" or ID3v2.4 multi-value strings)
+    /// into distinct trimmed artist names while preserving their original order.
+    static func parseArtists(_ raw: String) -> [String] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ["Unknown Artist"] }
+        let parts = trimmed
+            .components(separatedBy: CharacterSet(charactersIn: ";\u{0000}"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return [trimmed] }
+        var seen = Set<String>()
+        var unique: [String] = []
+        for part in parts {
+            let key = part.lowercased()
+            if seen.insert(key).inserted {
+                unique.append(part)
+            }
+        }
+        return unique
+    }
+
+    var artistList: [String] { Self.parseArtists(artist) }
+    var displayArtist: String { artistList.joined(separator: ", ") }
 }
 
 struct MusicPlaylist: Identifiable, Codable, Equatable {

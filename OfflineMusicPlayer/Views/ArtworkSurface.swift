@@ -22,7 +22,12 @@ actor ArtworkSurfaceCache {
         let input = CIImage(cgImage: thumbnail)
         let extent = input.extent
         let rotated = input.transformed(by: CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: extent.width, ty: extent.height))
-        let blurred = rotated.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 12]).cropped(to: extent)
+        // Boost saturation and subtle contrast before blurring so the ambient canvas retains rich album-art colors.
+        let vibrant = rotated.applyingFilter("CIColorControls", parameters: [
+            kCIInputSaturationKey: 1.85,
+            kCIInputContrastKey: 1.08
+        ])
+        let blurred = vibrant.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 14]).cropped(to: extent)
         guard let output = context.createCGImage(blurred, from: extent) else { return nil }
         let result = UIImage(cgImage: output)
         cache.setObject(result, forKey: key, cost: output.width * output.height * 4)
@@ -33,6 +38,7 @@ actor ArtworkSurfaceCache {
 struct ArtworkSurface: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var artworkURL: URL?
     @State private var image: UIImage?
     var body: some View {
@@ -41,17 +47,37 @@ struct ArtworkSurface: View {
                 Color(UIColor.systemBackground)
                 if !reduceTransparency, let image = image {
                     Image(uiImage: image).resizable().scaledToFill()
-                        .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                    Color(UIColor.systemBackground).opacity(scheme == .dark ? 0.72 : 0.70)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .saturation(scheme == .dark ? 1.45 : 1.15)
+                        .brightness(scheme == .dark ? -0.06 : 0.14)
+                        .clipped()
+                        .transition(.opacity)
+                    LinearGradient(
+                        colors: scheme == .dark
+                            ? [
+                                Color.black.opacity(0.18),
+                                Color.black.opacity(0.28),
+                                Color.black.opacity(0.46)
+                            ]
+                            : [
+                                Color.white.opacity(0.54),
+                                Color.white.opacity(0.64),
+                                Color.white.opacity(0.76)
+                            ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
                 }
-            }
+            }.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: artworkURL)
         }.ignoresSafeArea().accessibilityHidden(true)
             .task(id: artworkURL) {
-                image = nil
-                guard !reduceTransparency, let url = artworkURL else { return }
+                guard !reduceTransparency, let url = artworkURL else {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) { image = nil }
+                    return
+                }
                 let rendered = await ArtworkSurfaceCache.shared.image(at: url)
                 guard !Task.isCancelled else { return }
-                image = rendered
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) { image = rendered }
             }
     }
 }

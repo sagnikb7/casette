@@ -9,7 +9,7 @@ struct VisualPressButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
             .opacity(configuration.isPressed ? 0.65 : 1)
             .contentShape(Rectangle())
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .interactiveSpring(response: 0.22, dampingFraction: 0.75, blendDuration: 0.08), value: configuration.isPressed)
     }
 }
 
@@ -50,7 +50,7 @@ struct MarqueeText: View {
     private var overflows: Bool { containerWidth > 0 && textWidth > containerWidth + 0.5 }
 
     var body: some View {
-        Text(text).font(font).lineLimit(1).opacity(0)
+        Text(hugging ? text : " ").font(font).lineLimit(1).opacity(0)
             .frame(maxWidth: hugging ? nil : .infinity, alignment: .leading)
             .background(GeometryReader { Color.clear.preference(key: MarqueeWidthKey.self, value: [0: $0.size.width]) })
             .background(Text(text).font(font).fixedSize().hidden()
@@ -59,11 +59,16 @@ struct MarqueeText: View {
                 containerWidth = values[0] ?? containerWidth
                 textWidth = values[1] ?? textWidth
             }
-            .overlay(alignment: .leading) { content }
+            .overlay(alignment: .leading) {
+                content
+            }
             .clipped()
             .mask {
-                if overflows { fade }
-                else { Rectangle() }
+                if overflows {
+                    fade
+                } else {
+                    Color.black
+                }
             }
             .accessibilityElement(children: .ignore).accessibilityLabel(text)
     }
@@ -99,7 +104,6 @@ private struct MarqueeScroller: View {
             Text(text).font(font).foregroundColor(color)
             Text(text).font(font).foregroundColor(color)
         }.fixedSize().offset(x: moving ? -distance : 0)
-            .frame(maxWidth: .infinity, alignment: .leading)
             .onAppear {
                 withAnimation(.linear(duration: Double(distance) / 35).delay(1.5).repeatForever(autoreverses: false)) { moving = true }
             }
@@ -113,11 +117,27 @@ struct PlaybackArtworkView: View {
     var side: CGFloat
     var isPlaying: Bool
     var cornerRadius: CGFloat = 6
+    static let playingScale: CGFloat = 0.92
+    static let pausedScale: CGFloat = playingScale * 0.8
+    var scale: CGFloat {
+        track == nil ? 1 : (reduceMotion ? 1 : (isPlaying ? Self.playingScale : Self.pausedScale))
+    }
+    var springAnimation: Animation? {
+        guard !reduceMotion else { return nil }
+        return isPlaying
+            ? .spring(response: 0.42, dampingFraction: 0.56, blendDuration: 0.1)
+            : .spring(response: 0.34, dampingFraction: 0.88, blendDuration: 0.1)
+    }
     var body: some View {
-        ArtworkView(track: track, cornerRadius: cornerRadius).frame(width: side, height: side)
-            .shadow(color: .black.opacity(track != nil && (isPlaying || reduceMotion) ? 0.28 : 0), radius: 12, x: 0, y: 6)
-            .scaleEffect(track == nil ? 1 : isPlaying ? 1.04 : (reduceMotion ? 1 : 0.9))
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isPlaying)
+        ArtworkView(track: track, cornerRadius: cornerRadius, edgeInsetCrop: 2).frame(width: side, height: side)
+            .shadow(
+                color: .black.opacity(track == nil ? 0 : (isPlaying || reduceMotion) ? 0.28 : 0.12),
+                radius: (isPlaying || reduceMotion) ? 10 : 5,
+                x: 0,
+                y: (isPlaying || reduceMotion) ? 6 : 3
+            )
+            .scaleEffect(scale)
+            .animation(springAnimation, value: isPlaying)
             .frame(width: side, height: side)
     }
 }

@@ -17,7 +17,9 @@ struct ArtistGroupRow: View {
         }.frame(minHeight: 52)
         .task(id: enabled) {
             photo = nil
-            let result = await ArtistPhotoStore.shared.photo(for: artist)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard !Task.isCancelled else { return }
+            let result = await ArtistPhotoStore.shared.photo(for: artist, includeDetails: false)
             if !Task.isCancelled { photo = result }
         }
         .contextMenu { if photo != nil { Button("Photo Credit", systemImage: "info.circle") { credit = true } } }
@@ -25,10 +27,10 @@ struct ArtistGroupRow: View {
             if let photo = photo {
                 NavigationView {
                     Form {
-                        Section("Creator") { Text(photo.creator) }
-                        Section("License") { Text(photo.license); Link("License Terms", destination: photo.licenseURL) }
+                        Section("Creator / Artist") { Text(photo.creator) }
+                        Section("Source / License") { Text(photo.license); Link("Source Terms", destination: photo.licenseURL) }
                         Section { Link("Original Image and Attribution", destination: photo.sourceURL) }
-                        Section { Text("Thumbnail resized for the artist list. Wikimedia images retain their individual licenses.").font(.footnote) }
+                        Section { Text("600×600 artist image cached for offline browsing.").font(.footnote) }
                     }.background(BackGestureSupport(rootBack: { credit = false })).navigationTitle("Photo Credit").navigationBarTitleDisplayMode(.inline)
                         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { credit = false } } }
                 }.navigationViewStyle(.stack)

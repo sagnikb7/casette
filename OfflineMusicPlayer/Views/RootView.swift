@@ -11,16 +11,42 @@ struct RootView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var playback: PlaybackCoordinator
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var playerAnimation
     @State private var selectedTab = 0
     @State private var showingPlayer = false
+    @State private var playerDragOffset: CGFloat = 0
     @State private var launched = false
     @State private var keyboardVisible = false
     @AppStorage("appearance") private var appearance = "system"
-    var body: some View {
-        content.preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
-            .fullScreenCover(isPresented: $showingPlayer) {
-                NowPlayingView().environmentObject(library).environmentObject(playback)
+    static let playerSpring = Animation.spring(response: 0.38, dampingFraction: 0.88, blendDuration: 0.1)
+    private func setPlayerShowing(_ visible: Bool) {
+        if reduceMotion {
+            playerDragOffset = 0
+            showingPlayer = visible
+        } else {
+            withAnimation(Self.playerSpring) {
+                playerDragOffset = 0
+                showingPlayer = visible
             }
+        }
+    }
+    var body: some View {
+        ZStack {
+            content
+            if showingPlayer {
+                NowPlayingView(
+                    animationNamespace: playerAnimation,
+                    dismissDragOffset: $playerDragOffset,
+                    onDismiss: { setPlayerShowing(false) }
+                )
+                    .environmentObject(library)
+                    .environmentObject(playback)
+                    .transition(reduceMotion ? .opacity : .asymmetric(insertion: .opacity, removal: .opacity))
+                    .zIndex(10)
+            }
+        }
+        .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
             .sheet(item: $library.pickerRequest) { request in
                 MusicPicker(folders: request.folders, selected: { urls in
                     if request.folders { if let url = urls.first {
@@ -43,9 +69,9 @@ struct RootView: View {
             .onOpenURL { url in
                 if CassetteWidgetConfiguration.opensPlayer(url) {
                     playback.connect(library)
-                    showingPlayer = true
+                    setPlayerShowing(true)
                 } else if CassetteWidgetConfiguration.opensLibrary(url) {
-                    showingPlayer = false; selectedTab = 0
+                    setPlayerShowing(false); selectedTab = 0
                 }
             }
             .onAppear {
@@ -78,7 +104,12 @@ struct RootView: View {
         NavigationView { content().background(BackGestureSupport()) }.navigationViewStyle(.stack)
     }
     @ViewBuilder private var miniPlayer: some View {
-        if playback.currentTrack != nil { MiniPlayer(showingPlayer: $showingPlayer) }
+        if playback.currentTrack != nil {
+            MiniPlayer(
+                showingPlayer: Binding(get: { showingPlayer }, set: { setPlayerShowing($0) }),
+                animationNamespace: playerAnimation
+            )
+        }
     }
 }
 

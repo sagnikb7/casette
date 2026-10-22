@@ -22,6 +22,6 @@ struct WidgetPreviewView: View {
             }.padding(16)
         }.navigationTitle("Widgets").navigationBarTitleDisplayMode(.inline)
     }
-    private var snapshot: WidgetSnapshot { WidgetSnapshot(title: playback.currentTrack?.title ?? "", artist: playback.currentTrack?.artist ?? "", artworkName: nil) }
+    private var snapshot: WidgetSnapshot { WidgetSnapshot(title: playback.currentTrack?.title ?? "", artist: playback.currentTrack?.displayArtist ?? "", artworkName: nil) }
     private var image: UIImage? { playback.currentTrack?.artwork.flatMap { ThumbnailLoader.shared.image(library.artworkDirectory.appendingPathComponent($0).path) } }
 }

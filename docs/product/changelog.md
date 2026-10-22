@@ -6,6 +6,67 @@ Every user-facing feature or fix is recorded here when its release build succeed
 
 The build workflow moves pending feature/fix notes into a dated release section after successful packaging.
 
+## 1.6.4 — 22 October 2026
+
+Build: 27.
+
+### Changed
+
+- Add top and bottom linear gradient fade masks to the synced and plain lyrics scroll containers so scrolling lyrics blend smoothly into the border instead of clipping abruptly.
+- Reduce Now Playing album art scale so the playing state uses the previous paused size (0.92x) and the paused state shrinks to 80% of that size (0.736x).
+
+### Fixed
+
+- Clip and fade-mask MarqueeText to its container bounds rather than the inner fixedSize scroller width so scrolling titles never bleed across adjacent controls.
+- Keep a fixed 44-point trailing frame and 8-point spacing for the Now Playing 3-dot options menu so long song titles stop and fade cleanly before the menu button.
+
+## 1.6.3 — 22 October 2026
+
+Build: 26.
+
+### Fixed
+
+- Improved Now Playing text, control, and scrubber contrast in Light Mode against vibrant album-artwork backgrounds, including fixing the hardcoded white ellipsis button.
+- Enlarged Now Playing album artwork in both playing and paused states by tightening vertical spacing across the header, progress bar, and transport controls on compact 4-inch screens.
+
+## 1.6.2 — 22 October 2026
+
+Build: 25.
+
+### Fixed
+
+- Fixed Now Playing interactive slide-down transition getting stuck halfway when re-opened from the MiniPlayer by separating sheet-chrome slide transitions from matchedGeometryEffect("playerArtwork") and resetting dismiss drag state within the spring transaction.
+- Songs with multiple semicolon-separated artists now index each artist separately in the Artists list, display clean comma-separated names, and let you choose which artist to open from Go to Artist or by tapping an artist name in Now Playing.
+- Fixed the Now Playing album art drop shadow getting clipped at the top edge of the song title row during playback.
+
+## 1.6.1 — 22 October 2026
+
+Build: 24.
+
+### Fixed
+
+- Removed the faint single-pixel border around Now Playing album art and cropped 2px per side to hide embedded cover edge artifacts.
+- Now Playing dismiss is an Apple Music-style interactive sheet slide-down: a grabber pill, dimmed backdrop, and rounded top corners move with the whole sheet, and the release spring now continues smoothly into the MiniPlayer morph instead of snapping first.
+
+## 1.6.0 — 14 October 2026
+
+Build: 23.
+
+### Added
+
+- iTunes 600x600 artist artwork lookup with lazy MusicBrainz artist metadata enrichment (origin, active years, artist type, tags) and a collapsible Apple Music-style About card on artist pages.
+
+### Changed
+
+- Directional spring bounce on Now Playing album art when transitioning from paused to playing, critically damped settle on pause, and smooth matched-geometry artwork morphing into the MiniPlayer when minimizing or expanding.
+- Vibrant album-art ambient background in Now Playing for both Light and Dark Mode with boosted color saturation and a lighter, depth-graded scrim.
+- Isolated PlaybackClock tick observation into dedicated progress and synced-lyrics subviews, pre-decoded library artwork thumbnails, removed per-cell GeometryReaders, and cached history and search/filter computations.
+
+### Fixed
+
+- Preserved security-scoped and coordinated folder URLs when scanning external On My iPod folders so iOS does not drop folder read permissions mid-scan.
+- Eliminated duplicate 'Unavailable · reconnect folder' song rows and automatically reconnected matching disconnected folders when re-adding them.
+
 ## 1.5.6 — 13 October 2026
 
 Build: 22.
