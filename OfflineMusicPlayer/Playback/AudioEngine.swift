@@ -26,13 +26,19 @@ final class NativeAudioEngine: NSObject, AudioEngine, AVAudioPlayerDelegate {
 
     func load(_ url: URL) throws {
         stop()
-        guard url.isFileURL else { throw PlaybackError.localFilesOnly }
+        let isAppleMusicAsset = url.scheme?.lowercased() == "ipod-library"
+        guard url.isFileURL || isAppleMusicAsset else { throw PlaybackError.localFilesOnly }
         var candidate: AVAudioPlayer?
         var coordinationError: NSError?
         var decoderError: Error?
-        NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { file in
-            do { candidate = try AVAudioPlayer(contentsOf: file) }
+        if isAppleMusicAsset {
+            do { candidate = try AVAudioPlayer(contentsOf: url) }
             catch { decoderError = error }
+        } else {
+            NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { file in
+                do { candidate = try AVAudioPlayer(contentsOf: file) }
+                catch { decoderError = error }
+            }
         }
         if let error = coordinationError ?? (decoderError as NSError?) { throw error }
         guard let candidate = candidate else { throw PlaybackError.decoderFailed }

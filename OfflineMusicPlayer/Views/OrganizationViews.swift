@@ -109,6 +109,16 @@ struct SourceSettingsView: View {
     var body: some View {
         List {
             Section {
+                Toggle("Apple Music Library", isOn: Binding(
+                    get: { library.appleMusicEnabled },
+                    set: { library.setAppleMusicEnabled($0) }
+                )).disabled(library.busy)
+            } header: {
+                Text("Apple Music")
+            } footer: {
+                Text("Reads local DRM-free songs from your device’s Apple Music library. Cloud-only and DRM-protected tracks are skipped.")
+            }
+            Section {
                 ForEach(library.sources) { source in
                     NavigationLink { SourceDetailView(id: source.id) } label: {
                         VStack(alignment: .leading, spacing: 4) {
@@ -124,6 +134,8 @@ struct SourceSettingsView: View {
                 }
                 Button("Add Music Folder…") { library.pickerRequest = PickerRequest(folders: true) }
                 if library.scanning { ScanProgressView() }
+            } header: {
+                Text("Music Folders")
             } footer: {
                 Text("In Files, choose Browse → On My iPod and select a folder. iOS grants access to selected folders, not the entire device. Cassette’s own folder is scanned automatically. Source removal never deletes your audio.")
             }

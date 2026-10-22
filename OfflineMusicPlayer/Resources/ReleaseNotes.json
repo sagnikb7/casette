@@ -1,18 +1,10 @@
 {
-  "version": "1.6.4",
+  "version": "1.7.4",
   "sections": [
     {
-      "title": "Changed",
+      "title": "Added",
       "items": [
-        "Add top and bottom linear gradient fade masks to the synced and plain lyrics scroll containers so scrolling lyrics blend smoothly into the border instead of clipping abruptly.",
-        "Reduce Now Playing album art scale so the playing state uses the previous paused size (0.92x) and the paused state shrinks to 80% of that size (0.736x)."
-      ]
-    },
-    {
-      "title": "Fixed",
-      "items": [
-        "Clip and fade-mask MarqueeText to its container bounds rather than the inner fixedSize scroller width so scrolling titles never bleed across adjacent controls.",
-        "Keep a fixed 44-point trailing frame and 8-point spacing for the Now Playing 3-dot options menu so long song titles stop and fade cleanly before the menu button."
+        "Play or shuffle an entire folder (including all nested subfolders) directly from Library \u2192 Folders and inside any folder or subfolder view."
       ]
     }
   ]

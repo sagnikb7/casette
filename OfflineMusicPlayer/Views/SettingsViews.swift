@@ -31,12 +31,16 @@ struct SettingsView: View {
         List {
             Section {
                 NavigationLink("Music Folders") { SourceSettingsView() }
+                Toggle("Apple Music Library", isOn: Binding(
+                    get: { library.appleMusicEnabled },
+                    set: { library.setAppleMusicEnabled($0) }
+                )).disabled(library.busy)
                 Button("Import Audio Files") { library.pickerRequest = PickerRequest(folders: false) }.disabled(library.busy)
                 Button("Rescan Library") { library.rescan() }.disabled(library.busy)
                 NavigationLink("Library Statistics") { LibraryStatisticsView() }
                 if library.scanning { ScanProgressView() }
             } header: { Text("Music Library") } footer: {
-                Text(library.scanning ? library.scanStatus : "Startup checks saved folder timestamps, not every song. Changed local folders scan when playback stops. Rescan refreshes provider folders and edits to existing tags or lyrics.")
+                Text(library.scanning ? library.scanStatus : "Startup checks saved folder timestamps, not every song. Changed local folders scan when playback stops. Enable Apple Music Library to include local songs from the iOS Media Library. Rescan refreshes provider folders, Apple Music songs, and edits to existing tags or lyrics.")
             }
             Section("Playback") {
                 NavigationLink("Widgets") { WidgetPreviewView() }
@@ -135,7 +139,7 @@ struct ArtworkCacheSection: View {
     var body: some View {
         Section {
             LabeledContentRow(label: "Artwork Cache", value: bytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "Calculating…")
-            LabeledContentRow(label: "Cache Limit", value: "50 MB")
+            LabeledContentRow(label: "Cache Limit", value: "200 MB")
             if library.clearingArtwork { ProgressView("Clearing artwork…") }
             Button("Clear Artwork Cache", role: .destructive) { confirming = true }.disabled(library.busy || bytes == 0 || bytes == nil)
         } header: { Text("Storage") } footer: {

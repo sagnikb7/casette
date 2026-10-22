@@ -5,9 +5,14 @@ import ImageIO
 final class ThumbnailLoader {
     static let shared = ThumbnailLoader()
     private let cache = NSCache<NSString, UIImage>()
+    private var accessTimes: [String: Date] = [:]
+    private var lastDiskTouch: [String: Date] = [:]
     init() { cache.totalCostLimit = 18_000_000 }
     func image(_ path: String) -> UIImage? {
-        if let image = cache.object(forKey: path as NSString) { return image }
+        if let image = cache.object(forKey: path as NSString) {
+            recordAccess(path: path)
+            return image
+        }
         let url = URL(fileURLWithPath: path)
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
            let cgImage = CGImageSourceCreateImageAtIndex(source, 0, [
@@ -15,13 +20,42 @@ final class ThumbnailLoader {
            ] as CFDictionary) {
             let decoded = UIImage(cgImage: cgImage)
             cache.setObject(decoded, forKey: path as NSString, cost: cgImage.width * cgImage.height * 4)
+            recordAccess(path: path)
             return decoded
         }
         guard let image = UIImage(contentsOfFile: path) else { return nil }
         cache.setObject(image, forKey: path as NSString, cost: Int(image.size.width * image.size.height * 4))
+        recordAccess(path: path)
         return image
     }
-    func clear() { cache.removeAllObjects() }
+    func touch(_ filename: String, at date: Date = Date()) {
+        accessTimes[filename] = date
+    }
+    func snapshotAccessTimes() -> [String: Date] { accessTimes }
+    func removeEvicted(_ filenames: Set<String>, in directory: URL) {
+        for name in filenames {
+            let path = directory.appendingPathComponent(name).path
+            cache.removeObject(forKey: path as NSString)
+            accessTimes[name] = nil
+            lastDiskTouch[name] = nil
+        }
+    }
+    private func recordAccess(path: String) {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        let now = Date()
+        accessTimes[name] = now
+        if now.timeIntervalSince(lastDiskTouch[name] ?? .distantPast) >= 30 {
+            lastDiskTouch[name] = now
+            Task.detached(priority: .utility) {
+                try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: path)
+            }
+        }
+    }
+    func clear() {
+        cache.removeAllObjects()
+        accessTimes.removeAll()
+        lastDiskTouch.removeAll()
+    }
 }
 
 struct ArtworkView: View {
@@ -32,8 +66,12 @@ struct ArtworkView: View {
     /// artifacts baked into some embedded covers without affecting the placeholder tile.
     var edgeInsetCrop: CGFloat = 0
     var body: some View {
+        let _ = library.artworkRevision
+        let resolvedImage = track?.artwork.flatMap {
+            ThumbnailLoader.shared.image(library.artworkDirectory.appendingPathComponent($0).path)
+        }
         ZStack {
-            if let name = track?.artwork, let image = ThumbnailLoader.shared.image(library.artworkDirectory.appendingPathComponent(name).path) {
+            if let image = resolvedImage {
                 Image(uiImage: image).resizable().scaledToFill().padding(-edgeInsetCrop)
             } else {
                 Color(UIColor.secondarySystemBackground)
@@ -42,6 +80,10 @@ struct ArtworkView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .accessibilityHidden(true)
+        .task(id: "\(track?.id ?? ""):\(track?.artwork ?? "")") {
+            guard resolvedImage == nil, let track = track else { return }
+            await library.restoreArtworkIfNeeded(for: track)
+        }
     }
 }
 
@@ -427,21 +469,21 @@ struct GroupsView: View {
 
 struct FoldersView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var removing: MusicSource?
     var body: some View {
-        let counts: [UUID: Int] = library.visibleTracks.reduce(into: [:]) { acc, track in
-            for location in track.locations where location.available { acc[location.sourceID, default: 0] += 1 }
-        }
         return List {
             ForEach(library.sources) { source in
-                HStack {
+                let folderTracks = library.tracks(in: source)
+                let playable = folderTracks.contains(where: \.available)
+                HStack(spacing: 8) {
                     NavigationLink { FolderContentsView(source: source, path: "") } label: {
                         HStack {
                             Image(systemName: source.needsReconnect ? "exclamationmark.triangle.fill" : "folder.fill")
                                 .foregroundColor(source.needsReconnect ? .orange : .blue).frame(width: 32)
                             VStack(alignment: .leading) {
                                 Text(source.name)
-                                Text(source.needsReconnect ? "Reconnect required" : "\(counts[source.id, default: 0]) songs")
+                                Text(source.needsReconnect ? "Reconnect required" : "\(folderTracks.count) songs")
                                     .font(.footnote).foregroundColor(source.needsReconnect ? .orange : .secondary)
                             }
                         }.frame(minHeight: 44)
@@ -451,11 +493,47 @@ struct FoldersView: View {
                             library.pickerRequest = PickerRequest(folders: true, reconnecting: source.id)
                         }.buttonStyle(.bordered).controlSize(.small)
                     }
+                    Menu {
+                        Button("Play Folder", systemImage: "play.fill") {
+                            playback.play(folderTracks)
+                        }.disabled(!playable)
+                        Button("Shuffle Folder", systemImage: "shuffle") {
+                            playback.play(folderTracks, shuffled: true)
+                        }.disabled(!playable)
+                        Divider()
+                        if !source.isOwned && source.needsReconnect {
+                            Button("Reconnect Folder…", systemImage: "folder.badge.gearshape") {
+                                library.pickerRequest = PickerRequest(folders: true, reconnecting: source.id)
+                            }
+                        }
+                        Button("Rescan", systemImage: "arrow.clockwise") {
+                            library.rescan(only: source.id)
+                        }.disabled(library.busy || !source.enabled)
+                        if !source.isOwned {
+                            Button("Remove from Library", systemImage: "trash", role: .destructive) {
+                                removing = source
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .foregroundColor(.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Options for \(source.name)")
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     if !source.isOwned { Button("Remove", role: .destructive) { removing = source } }
                 }
                 .contextMenu {
+                    Button("Play Folder", systemImage: "play.fill") {
+                        playback.play(folderTracks)
+                    }.disabled(!playable)
+                    Button("Shuffle Folder", systemImage: "shuffle") {
+                        playback.play(folderTracks, shuffled: true)
+                    }.disabled(!playable)
+                    Divider()
                     if !source.isOwned && source.needsReconnect {
                         Button("Reconnect Folder…") { library.pickerRequest = PickerRequest(folders: true, reconnecting: source.id) }
                     }
@@ -479,15 +557,59 @@ struct FolderContentsView: View {
     var path: String
     var body: some View {
         let currentEntries: [(Track, String)] = library.sortedTracks.compactMap { track in
-            guard let location = track.locations.first(where: { $0.sourceID == source.id }), location.relativePath.hasPrefix(path) else { return nil }
+            guard let location = track.locations.first(where: { $0.sourceID == source.id && source.permits($0.relativePath) && $0.relativePath.hasPrefix(path) }) else { return nil }
             return (track, String(location.relativePath.dropFirst(path.count)))
         }
+        let allSongs = currentEntries.map(\.0)
         let folders = Set(currentEntries.compactMap { $0.1.contains("/") ? $0.1.components(separatedBy: "/").first : nil }).sorted()
         let songs = currentEntries.filter { !$0.1.contains("/") }.map { $0.0 }
         return List {
-            ForEach(folders, id: \.self) { folder in NavigationLink { FolderContentsView(source: source, path: path + folder + "/") } label: { Label(folder, systemImage: "folder") }.subtleSeparator() }
-            if !songs.isEmpty { PlayButtons(tracks: songs) }
-            ForEach(songs) { track in SongRow(track: track) { playback.play(songs, startingAt: track) } }
+            if !allSongs.isEmpty {
+                PlayButtons(tracks: allSongs).listRowSeparator(.hidden)
+            }
+            ForEach(folders, id: \.self) { folder in
+                let subfolderPath = path + folder + "/"
+                let subfolderSongs = currentEntries.filter { $0.1.hasPrefix(folder + "/") }.map(\.0)
+                let subfolderPlayable = subfolderSongs.contains(where: \.available)
+                HStack(spacing: 8) {
+                    NavigationLink {
+                        FolderContentsView(source: source, path: subfolderPath)
+                    } label: {
+                        HStack {
+                            Image(systemName: "folder.fill").foregroundColor(.blue).frame(width: 28)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(folder)
+                                Text("\(subfolderSongs.count) songs").font(.footnote).foregroundColor(.secondary)
+                            }
+                        }.frame(minHeight: 44)
+                    }
+                    Menu {
+                        Button("Play Folder", systemImage: "play.fill") {
+                            playback.play(subfolderSongs)
+                        }.disabled(!subfolderPlayable)
+                        Button("Shuffle Folder", systemImage: "shuffle") {
+                            playback.play(subfolderSongs, shuffled: true)
+                        }.disabled(!subfolderPlayable)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .foregroundColor(.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Options for \(folder)")
+                }
+                .contextMenu {
+                    Button("Play Folder", systemImage: "play.fill") {
+                        playback.play(subfolderSongs)
+                    }.disabled(!subfolderPlayable)
+                    Button("Shuffle Folder", systemImage: "shuffle") {
+                        playback.play(subfolderSongs, shuffled: true)
+                    }.disabled(!subfolderPlayable)
+                }
+                .subtleSeparator()
+            }
+            ForEach(songs) { track in SongRow(track: track) { playback.play(allSongs, startingAt: track) } }
             if currentEntries.isEmpty { Text("No indexed audio in this folder.").foregroundColor(.secondary) }
         }.listStyle(.plain).miniPlayerClearance().navigationTitle(path.isEmpty ? source.name : String(path.dropLast()).components(separatedBy: "/").last ?? source.name).navigationBarTitleDisplayMode(.inline)
     }

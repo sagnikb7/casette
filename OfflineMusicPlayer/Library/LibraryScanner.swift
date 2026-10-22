@@ -1,6 +1,76 @@
 import AVFoundation
+import CryptoKit
+import MediaPlayer
 import UIKit
 import ImageIO
+
+struct AppleMusicTrackItem: Sendable {
+    var persistentID: UInt64
+    var title: String
+    var artist: String
+    var albumArtist: String
+    var album: String
+    var genre: String
+    var duration: Double
+    var trackNumber: Int
+    var discNumber: Int
+    var assetURL: URL?
+    var isCloudItem: Bool = false
+    var hasProtectedAsset: Bool = false
+    var lyrics: String? = nil
+    var artworkData: (@Sendable () -> Data?)? = nil
+}
+
+protocol AppleMusicLibraryProviding: Sendable {
+    func authorizationStatus() -> MPMediaLibraryAuthorizationStatus
+    func requestAuthorization() async -> MPMediaLibraryAuthorizationStatus
+    func fetchTracks() -> [AppleMusicTrackItem]
+}
+
+struct SystemAppleMusicLibrary: AppleMusicLibraryProviding {
+    func authorizationStatus() -> MPMediaLibraryAuthorizationStatus {
+        MPMediaLibrary.authorizationStatus()
+    }
+
+    func requestAuthorization() async -> MPMediaLibraryAuthorizationStatus {
+        await withCheckedContinuation { continuation in
+            MPMediaLibrary.requestAuthorization { status in
+                continuation.resume(returning: status)
+            }
+        }
+    }
+
+    func fetchTracks() -> [AppleMusicTrackItem] {
+        guard let items = MPMediaQuery.songs().items else { return [] }
+        return items.map { item in
+            let title = item.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let artist = item.artist?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let albumArtist = item.albumArtist?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let album = item.albumTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let genre = item.genre?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let artwork = item.artwork
+            let resolvedArtist = (artist?.isEmpty == false ? artist! : "Unknown Artist")
+            return AppleMusicTrackItem(
+                persistentID: item.persistentID,
+                title: (title?.isEmpty == false ? title! : "Unknown Title"),
+                artist: resolvedArtist,
+                albumArtist: (albumArtist?.isEmpty == false ? albumArtist! : resolvedArtist),
+                album: (album?.isEmpty == false ? album! : "Unknown Album"),
+                genre: (genre?.isEmpty == false ? genre! : "Unknown Genre"),
+                duration: item.playbackDuration.isFinite && item.playbackDuration > 0 ? item.playbackDuration : 0,
+                trackNumber: item.albumTrackNumber,
+                discNumber: item.discNumber,
+                assetURL: item.assetURL,
+                isCloudItem: item.isCloudItem,
+                hasProtectedAsset: item.hasProtectedAsset,
+                lyrics: item.lyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? item.lyrics : nil,
+                artworkData: artwork.map { mediaArtwork in
+                    { mediaArtwork.image(at: CGSize(width: 320, height: 320))?.jpegData(compressionQuality: 0.8) }
+                }
+            )
+        }
+    }
+}
 
 struct ScanResult {
     var tracks: [Track]
@@ -141,7 +211,8 @@ actor LibraryScanner {
                     fingerprint += ":lrc:\(lyricAttributes.fileSize ?? 0):\(lyricAttributes.contentModificationDate?.timeIntervalSince1970 ?? 0)"
                 }
                 var track: Track
-                if let previous = existing[identity], previous.fingerprint == fingerprint, previous.audioFormat != nil { track = previous }
+                let artworkExists = existing[identity]?.artwork.map { FileManager.default.fileExists(atPath: cache.appendingPathComponent($0).path) } ?? true
+                if let previous = existing[identity], previous.fingerprint == fingerprint, previous.audioFormat != nil, artworkExists { track = previous }
                 else {
                     track = try await metadata(file, id: identity, fingerprint: fingerprint, cache: cache)
                     if let previous = existing[identity] { track.added = previous.added; track.favorite = previous.favorite; track.locations = previous.locations }
@@ -263,18 +334,8 @@ actor LibraryScanner {
         let artist = value(.commonKeyArtist) ?? "Unknown Artist"
         let album = value(.commonKeyAlbumName) ?? "Unknown Album"
         var artwork: String?
-        if let data = items.first(where: { $0.commonKey == .commonKeyArtwork })?.dataValue,
-           data.count < 15_000_000,
-           let source = CGImageSourceCreateWithData(data as CFData, nil),
-           let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-               kCGImageSourceCreateThumbnailFromImageAlways: true,
-               kCGImageSourceCreateThumbnailWithTransform: true,
-               kCGImageSourceThumbnailMaxPixelSize: 320,
-               kCGImageSourceShouldCacheImmediately: true
-           ] as CFDictionary) {
-            let thumbnail = UIImage(cgImage: image)
-            let name = UUID().uuidString + ".jpg"
-            if let jpg = thumbnail.jpegData(compressionQuality: 0.8) { try jpg.write(to: cache.appendingPathComponent(name), options: .atomic); artwork = name }
+        if let data = await Self.extractArtworkData(from: asset, preloadedItems: items) {
+            artwork = try? Self.writeThumbnail(from: data, to: cache)
         }
         var lyrics = tag(["USLT", "lyrics"])
         let lrc = url.deletingPathExtension().appendingPathExtension("lrc")
@@ -287,5 +348,170 @@ actor LibraryScanner {
                      trackNumber: Int((tag(["trackNumber", "TRCK"]) ?? "0").components(separatedBy: "/")[0]) ?? 0,
                      discNumber: Int((tag(["discNumber", "TPOS"]) ?? "0").components(separatedBy: "/")[0]) ?? 0,
                      fingerprint: fingerprint, artwork: artwork, lyrics: lyrics, locations: [], added: Date(), audioFormat: format, bitrate: bitrate)
+    }
+
+    func scanAppleMusic(items: [AppleMusicTrackItem], sourceID: UUID, existing: [String: Track], cache: URL,
+                        checked: @escaping @Sendable (Int) async -> Void = { _ in },
+                        progress: @escaping @Sendable ([Track], Int) async -> Void) async throws -> ScanResult {
+        var tracks: [Track] = []
+        var batch: [Track] = []
+        var seen = Set<String>()
+        var skipped = 0
+        var count = 0
+        var lastProgress = ProcessInfo.processInfo.systemUptime
+
+        for item in items {
+            try Task.checkCancellation()
+            guard !item.hasProtectedAsset, let assetURL = item.assetURL,
+                  assetURL.isFileURL || assetURL.scheme?.lowercased() == "ipod-library" else {
+                skipped += 1
+                continue
+            }
+            count += 1
+            let identity = "apple-music:\(item.persistentID)"
+            let relative = assetURL.isFileURL ? assetURL.path : assetURL.absoluteString
+            let fingerprint = "\(item.persistentID):\(item.title):\(item.artist):\(item.album):\(Int(item.duration.rounded())):\(relative)"
+            var track: Track
+            let artworkExists = existing[identity]?.artwork.map { FileManager.default.fileExists(atPath: cache.appendingPathComponent($0).path) } ?? true
+            if let previous = existing[identity], previous.fingerprint == fingerprint, previous.audioFormat != nil, artworkExists {
+                track = previous
+            } else {
+                var artwork: String? = artworkExists ? existing[identity]?.artwork : nil
+                if artwork == nil, let data = item.artworkData?(), !data.isEmpty {
+                    artwork = try? Self.writeThumbnail(from: data, to: cache)
+                }
+                let ext = assetURL.pathExtension.uppercased()
+                var format = ext.isEmpty ? "Apple Music" : ext
+                var bitrate: Int?
+                let asset = AVURLAsset(url: assetURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+                if artwork == nil, let data = await Self.extractArtworkData(from: asset) {
+                    artwork = try? Self.writeThumbnail(from: data, to: cache)
+                }
+                if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first {
+                    if let rate = try? await audioTrack.load(.estimatedDataRate), rate.isFinite && rate > 0 {
+                        bitrate = Int(rate.rounded())
+                    }
+                    if let descriptions = try? await audioTrack.load(.formatDescriptions),
+                       let description = descriptions.first,
+                       let stream = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee {
+                        switch stream.mFormatID {
+                        case kAudioFormatMPEGLayer3: format = "MP3"
+                        case kAudioFormatMPEG4AAC, kAudioFormatMPEG4AAC_HE, kAudioFormatMPEG4AAC_HE_V2: format = "AAC"
+                        case kAudioFormatAppleLossless: format = "ALAC"
+                        case kAudioFormatLinearPCM: format = "\(ext.isEmpty ? "WAV" : ext) / PCM"
+                        case kAudioFormatFLAC: format = "FLAC"
+                        case kAudioFormatOpus: format = "Opus"
+                        default: break
+                        }
+                    }
+                }
+                var duration = item.duration
+                if (!duration.isFinite || duration <= 0), let loaded = try? await asset.load(.duration).seconds, loaded.isFinite && loaded > 0 {
+                    duration = loaded
+                }
+                track = Track(
+                    id: identity,
+                    title: item.title,
+                    artist: item.artist,
+                    albumArtist: item.albumArtist,
+                    album: item.album,
+                    genre: item.genre,
+                    duration: duration.isFinite ? duration : 0,
+                    trackNumber: item.trackNumber,
+                    discNumber: item.discNumber,
+                    fingerprint: fingerprint,
+                    artwork: artwork,
+                    lyrics: item.lyrics,
+                    locations: existing[identity]?.locations ?? [],
+                    added: existing[identity]?.added ?? Date(),
+                    favorite: existing[identity]?.favorite ?? false,
+                    audioFormat: format,
+                    bitrate: bitrate
+                )
+            }
+            let location = TrackLocation(sourceID: sourceID, relativePath: relative, available: true)
+            if let index = track.locations.firstIndex(where: { $0.sourceID == sourceID }) {
+                track.locations[index] = location
+            } else {
+                track.locations.append(location)
+            }
+            seen.insert(identity)
+            tracks.append(track)
+            if existing[identity] != track { batch.append(track) }
+            if batch.count == 25 { await progress(batch, count); batch.removeAll() }
+            if ProcessInfo.processInfo.systemUptime - lastProgress >= 0.25 {
+                await checked(count)
+                lastProgress = ProcessInfo.processInfo.systemUptime
+            }
+        }
+        if !batch.isEmpty { await progress(batch, count) }
+        await checked(count)
+        return ScanResult(tracks: tracks, seen: seen, skipped: skipped, issues: [], playlists: [], complete: true, directories: [], directoryCheckReliable: false)
+    }
+
+    static func writeThumbnail(from data: Data, to cache: URL) throws -> String? {
+        guard !data.isEmpty, data.count < 25_000_000 else { return nil }
+        let digest = SHA256.hash(data: data)
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+        let name = hex + ".jpg"
+        let destination = cache.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: destination.path)
+            return name
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 320,
+                  kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary),
+              let jpg = UIImage(cgImage: image).jpegData(compressionQuality: 0.8) else { return nil }
+        try jpg.write(to: destination, options: .atomic)
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: destination.path)
+        return name
+    }
+
+    private static func extractArtworkData(from asset: AVURLAsset, preloadedItems: [AVMetadataItem]? = nil) async -> Data? {
+        let common = (try? await asset.load(.commonMetadata)) ?? []
+        let allItems: [AVMetadataItem]
+        if let preloadedItems = preloadedItems {
+            allItems = common + preloadedItems
+        } else {
+            let metadata = (try? await asset.load(.metadata)) ?? []
+            allItems = common + metadata
+        }
+        for item in allItems {
+            let isArtwork = item.commonKey == .commonKeyArtwork
+                || item.identifier == .commonIdentifierArtwork
+                || item.identifier == .id3MetadataAttachedPicture
+                || item.identifier == .iTunesMetadataCoverArt
+                || (item.key as? String)?.uppercased().contains("PIC") == true
+                || (item.key as? String)?.lowercased().contains("covr") == true
+            guard isArtwork else { continue }
+            if let data = (try? await item.load(.dataValue)) ?? item.dataValue, !data.isEmpty {
+                return data
+            }
+            if let value = (try? await item.load(.value)) ?? item.value {
+                if let data = value as? Data, !data.isEmpty { return data }
+                if let dict = value as? NSDictionary, let data = dict["data"] as? Data, !data.isEmpty { return data }
+            }
+        }
+        return nil
+    }
+
+    func extractArtwork(from url: URL, cache: URL) async -> String? {
+        var asset: AVURLAsset?
+        if url.scheme?.lowercased() == "ipod-library" {
+            asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+        } else {
+            var readError: NSError?
+            NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges, error: &readError) { coordinatedURL in
+                asset = AVURLAsset(url: coordinatedURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+            }
+            if readError != nil { return nil }
+        }
+        guard let asset = asset, let data = await Self.extractArtworkData(from: asset) else { return nil }
+        return try? Self.writeThumbnail(from: data, to: cache)
     }
 }

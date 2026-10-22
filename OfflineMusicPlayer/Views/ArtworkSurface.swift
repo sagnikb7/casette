@@ -36,10 +36,13 @@ actor ArtworkSurfaceCache {
 }
 
 struct ArtworkSurface: View {
+    static let darkModeSaturation: Double = 1.25
+    static let lightModeSaturation: Double = 1.15
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var artworkURL: URL?
+    var revision: Int = 0
     @State private var image: UIImage?
     var body: some View {
         GeometryReader { geometry in
@@ -48,16 +51,16 @@ struct ArtworkSurface: View {
                 if !reduceTransparency, let image = image {
                     Image(uiImage: image).resizable().scaledToFill()
                         .frame(width: geometry.size.width, height: geometry.size.height)
-                        .saturation(scheme == .dark ? 1.45 : 1.15)
+                        .saturation(scheme == .dark ? Self.darkModeSaturation : Self.lightModeSaturation)
                         .brightness(scheme == .dark ? -0.06 : 0.14)
                         .clipped()
                         .transition(.opacity)
                     LinearGradient(
                         colors: scheme == .dark
                             ? [
-                                Color.black.opacity(0.18),
-                                Color.black.opacity(0.28),
-                                Color.black.opacity(0.46)
+                                Color.black.opacity(0.22),
+                                Color.black.opacity(0.32),
+                                Color.black.opacity(0.50)
                             ]
                             : [
                                 Color.white.opacity(0.54),
@@ -70,7 +73,7 @@ struct ArtworkSurface: View {
                 }
             }.animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: artworkURL)
         }.ignoresSafeArea().accessibilityHidden(true)
-            .task(id: artworkURL) {
+            .task(id: "\(artworkURL?.path ?? ""):\(revision)") {
                 guard !reduceTransparency, let url = artworkURL else {
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) { image = nil }
                     return

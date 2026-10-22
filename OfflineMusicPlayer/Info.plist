@@ -13,9 +13,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.6.4</string>
+	<string>1.7.4</string>
 	<key>CFBundleVersion</key>
-	<string>27</string>
+	<string>34</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchScreen</key>
@@ -28,6 +28,8 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>Cassette reads local songs from your Apple Music library on this device when Apple Music Library is enabled in Settings.</string>
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UISupportedInterfaceOrientations</key>

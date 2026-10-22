@@ -33,6 +33,7 @@ struct RootView: View {
     }
     var body: some View {
         ZStack {
+            Color(UIColor.systemBackground).ignoresSafeArea()
             content
             if showingPlayer {
                 NowPlayingView(
@@ -69,7 +70,11 @@ struct RootView: View {
             .onOpenURL { url in
                 if CassetteWidgetConfiguration.opensPlayer(url) {
                     playback.connect(library)
-                    setPlayerShowing(true)
+                    if playback.currentTrack != nil {
+                        setPlayerShowing(true)
+                    } else {
+                        setPlayerShowing(false); selectedTab = 0
+                    }
                 } else if CassetteWidgetConfiguration.opensLibrary(url) {
                     setPlayerShowing(false); selectedTab = 0
                 }
@@ -80,8 +85,8 @@ struct RootView: View {
             .onChange(of: playback.playbackRequested) { library.setPlaybackActive($0 || playback.isPlaying) }
             .onChange(of: playback.isPlaying) { library.setPlaybackActive($0 || playback.playbackRequested) }
             .onChange(of: scenePhase) { phase in
-                if phase == .active { library.setSceneActive(true); playback.checkSleepTimer() }
-                else if phase == .background { library.setSceneActive(false); playback.persist() }
+                if phase == .active { library.setSceneActive(true); playback.checkSleepTimer(); playback.refreshWidgets() }
+                else if phase == .background { library.setSceneActive(false); playback.persist(); playback.refreshWidgets() }
             }
     }
     @ViewBuilder private var content: some View {

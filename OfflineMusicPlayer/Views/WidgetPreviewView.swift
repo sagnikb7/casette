@@ -22,6 +22,7 @@ struct WidgetPreviewView: View {
             }.padding(16)
         }.navigationTitle("Widgets").navigationBarTitleDisplayMode(.inline)
     }
-    private var snapshot: WidgetSnapshot { WidgetSnapshot(title: playback.currentTrack?.title ?? "", artist: playback.currentTrack?.displayArtist ?? "", artworkName: nil) }
-    private var image: UIImage? { playback.currentTrack?.artwork.flatMap { ThumbnailLoader.shared.image(library.artworkDirectory.appendingPathComponent($0).path) } }
+    private var displayedTrack: Track? { playback.currentTrack ?? library.recentlyPlayed.first?.track }
+    private var snapshot: WidgetSnapshot { WidgetSnapshot(title: displayedTrack?.title ?? "", artist: displayedTrack?.displayArtist ?? "", artworkName: nil) }
+    private var image: UIImage? { displayedTrack?.artwork.flatMap { ThumbnailLoader.shared.image(library.artworkDirectory.appendingPathComponent($0).path) } }
 }

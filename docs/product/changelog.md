@@ -6,6 +6,52 @@ Every user-facing feature or fix is recorded here when its release build succeed
 
 The build workflow moves pending feature/fix notes into a dated release section after successful packaging.
 
+## 1.7.4 — 22 October 2026
+
+Build: 34.
+
+### Added
+
+- Play or shuffle an entire folder (including all nested subfolders) directly from Library → Folders and inside any folder or subfolder view.
+
+## 1.7.3 — 22 October 2026
+
+Build: 33.
+
+### Fixed
+
+- Extend the Now Playing ArtworkSurface and sheet clip shape edge-to-edge across the status bar and home-indicator safe areas so the top status bar is never left uncolored.
+
+## 1.7.2 — 22 October 2026
+
+Build: 32.
+
+### Fixed
+
+- Embed App Group entitlements and DER entitlements directly in the packaged iOS app and widget extension binaries so sideloading and re-signing tools provision shared widget storage.
+- Resolve re-signed App Group identifiers dynamically from embedded provisioning metadata and runtime bundle identifiers, with shared UserDefaults fallback for widget snapshots and artwork.
+- Avoid duplicate opaque foreground backgrounds on iOS 17+ and preserve full-color cover and brand rendering in iOS 18+ accented Home Screen widget modes.
+- Keep forced widget timeline reloads across startup library updates, restore evicted artwork before publishing, and refresh widgets on scene activation and backgrounding.
+
+## 1.7.1 — 22 October 2026
+
+Build: 29.
+
+### Changed
+
+- Increase the disk artwork cache limit from 50 MB to 200 MB.
+- Slightly reduce Dark Mode saturation on the Now Playing ambient artwork background for softer color balance.
+- Replace alphabetical artwork cache trimming with a content-addressed SHA-256 deduplicated Least Recently Used (LRU) cache that re-parses evicted song artwork on demand when viewed or played.
+
+## 1.7.0 — 22 October 2026
+
+Build: 28.
+
+### Added
+
+- Add an Apple Music Library toggle in Settings → Music Library and Settings → Music Folders to read and play local DRM-free songs from the iOS Media Library alongside folder-based tracks.
+- Index Apple Music song metadata, artwork, lyrics, and audio format details while skipping cloud-only or DRM-protected items and preserving favorites and playlists when toggled off.
+
 ## 1.6.4 — 22 October 2026
 
 Build: 27.

@@ -30,7 +30,7 @@ Views use a persistent mini-player above the iOS tab bar and a full-screen Now P
 
 ## Artwork and lyrics
 
-Embedded artwork is reduced to 320×320 JPEGs off the main UI flow. Disk cache is trimmed to 50 MB off the main actor when new thumbnails are produced; thumbnail memory cache is capped at 12 MB. Cache clearing removes generated thumbnails only. A missing/evicted thumbnail falls back to a semantic note symbol.
+Embedded artwork is reduced to 320×320 JPEGs off the main UI flow and content-addressed by SHA-256 digest so tracks sharing identical album art reuse a single thumbnail file. Disk cache is trimmed to 200 MB using Least Recently Used (LRU) ordering off the main actor when thumbnails are produced, and any song whose cover was previously evicted is re-parsed on demand when viewed or played; thumbnail memory cache is capped at 18 MB. Cache clearing removes generated thumbnails only. A missing thumbnail falls back to a semantic note symbol.
 
 Embedded plain lyrics and matching adjacent UTF-8 LRC are retained in the index. LRC supports offsets and multiple timestamps, highlights by playback time and permits tap-to-seek/manual scroll. No synchronized timestamps are invented for plain text. Binary synchronized tags and codec-specific numeric/tag parsing remain incomplete.
 

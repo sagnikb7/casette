@@ -92,6 +92,12 @@ def verify(root, app=None, ipa=None, platform='ipod'):
             widget_commands = subprocess.check_output(['xcrun', 'vtool', '-show-build', str(widget_executable)], text=True)
             assert re.search(r'platform\s+IOS\b', widget_commands) and re.search(r'minos\s+15\.0\b', widget_commands)
             assert (extension / 'Assets.car').exists(), 'Widget brand asset missing'
+            for bundle in [app, extension]:
+                xcent = bundle / 'archived-expanded-entitlements.xcent'
+                assert xcent.is_file(), f'Missing archived-expanded-entitlements.xcent in {bundle.name}'
+                assert plistlib.loads(xcent.read_bytes()).get('com.apple.security.application-groups') == ['group.com.local.offlinemusicplayer'], f'Invalid xcent in {bundle.name}'
+                signed_entitlements = subprocess.check_output(['codesign', '-d', '--entitlements', ':-', str(bundle)], stderr=subprocess.DEVNULL)
+                assert plistlib.loads(signed_entitlements).get('com.apple.security.application-groups') == ['group.com.local.offlinemusicplayer'], f'Missing signed App Group entitlement in {bundle.name}'
     if ipa:
         assert ipa.name == f"Cassette-unsigned-{expected}.ipa", "IPA filename must match its version"
         with zipfile.ZipFile(ipa) as archive:

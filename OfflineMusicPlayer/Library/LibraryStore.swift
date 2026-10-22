@@ -1,16 +1,22 @@
 import Foundation
 import Combine
+import MediaPlayer
 
 @MainActor
 final class LibraryStore: ObservableObject {
+    static let appleMusicSourceID = UUID(uuidString: "A11E0000-0000-4000-8000-00000000A11E")!
+    static let artworkCacheLimitBytes = 200_000_000
+
     @Published private(set) var tracks: [Track] = [] {
         didSet { trackLookup = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) }); visibleCache = nil; sortedCache = nil; browseCache = nil; historyCache = nil }
     }
     @Published private(set) var sources: [MusicSource] = [] { didSet { visibleCache = nil; sortedCache = nil; browseCache = nil; historyCache = nil } }
+    @Published private(set) var appleMusicEnabled = false { didSet { visibleCache = nil; sortedCache = nil; browseCache = nil; historyCache = nil } }
     @Published private(set) var playbackHistory: [PlaybackHistoryEntry] = [] { didSet { historyCache = nil } }
     @Published private(set) var playlists: [MusicPlaylist] = []
     @Published private(set) var scanning = false
     @Published private(set) var clearingArtwork = false
+    @Published private(set) var artworkRevision = 0
     var busy: Bool { scanning || clearingArtwork }
     @Published private(set) var scannedCount = 0
     @Published private(set) var scanStatus = ""
@@ -20,6 +26,7 @@ final class LibraryStore: ObservableObject {
     let artworkDirectory: URL
     private(set) var database: LibraryDatabase?
     private let scanner = LibraryScanner()
+    private let appleMusicProvider: AppleMusicLibraryProviding
     private var scanTask: Task<Void, Never>?
     private var trackLookup: [String: Track] = [:]
     private var visibleCache: [Track]?
@@ -27,6 +34,7 @@ final class LibraryStore: ObservableObject {
     private var browseCache: BrowseIndex?
     private var historyCache: [PlayedSong]?
     private var artworkNeedsTrim = false
+    private var artworkRestoreInFlight = Set<String>()
     private var lastScan = Date.distantPast
     private var checkpoints: [UUID: ScanCheckpoint] = [:]
     private var discoveryStarted = false
@@ -42,7 +50,8 @@ final class LibraryStore: ObservableObject {
     private var folderChanges: [FolderChange] = []
     private var firstScanGrants: [UUID: FolderAccess] = [:]
 
-    init(documents: URL? = nil, inMemory: Bool = false, databaseURL: URL? = nil) {
+    init(documents: URL? = nil, inMemory: Bool = false, databaseURL: URL? = nil, appleMusicProvider: AppleMusicLibraryProviding = SystemAppleMusicLibrary()) {
+        self.appleMusicProvider = appleMusicProvider
         let fm = FileManager.default
         #if targetEnvironment(macCatalyst)
         // Catalyst preview is app-specific even when launched with an ad-hoc signature without sandbox entitlements.
@@ -75,6 +84,7 @@ final class LibraryStore: ObservableObject {
             tracks = try database!.all("track", as: Track.self)
             trackLookup = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
             sources = try database!.all("source", as: MusicSource.self)
+            appleMusicEnabled = (try? database?.all("appleMusicPreference", as: Bool.self).first) ?? false
             playlists = try database!.all("playlist", as: MusicPlaylist.self)
             playbackHistory = try database!.all("history", as: PlaybackHistoryEntry.self).sorted { $0.playedAt > $1.playedAt }
             for index in sources.indices where sources[index].isOwned && sources[index].name != "Cassette" {
@@ -87,10 +97,18 @@ final class LibraryStore: ObservableObject {
         } catch { errorMessage = "Couldn't open your library: \(error.localizedDescription)" }
     }
 
+    func permitsLocation(_ location: TrackLocation, roots: [UUID: MusicSource]? = nil) -> Bool {
+        if location.sourceID == Self.appleMusicSourceID {
+            return appleMusicEnabled
+        }
+        let source = roots?[location.sourceID] ?? sources.first(where: { $0.id == location.sourceID })
+        return source?.permits(location.relativePath) ?? false
+    }
+
     var visibleTracks: [Track] {
         if let cached = visibleCache { return cached }
         let roots = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
-        let permitted = tracks.filter { track in track.locations.contains { roots[$0.sourceID]?.permits($0.relativePath) ?? false } }
+        let permitted = tracks.filter { track in track.locations.contains { permitsLocation($0, roots: roots) } }
         let availableKeys = Set(permitted.filter(\.available).map { "\($0.title.lowercased())|\($0.artist.lowercased())|\($0.album.lowercased())|\($0.fingerprint)" })
         let result = permitted.filter { track in
             track.available || !availableKeys.contains("\(track.title.lowercased())|\(track.artist.lowercased())|\(track.album.lowercased())|\(track.fingerprint)")
@@ -123,6 +141,15 @@ final class LibraryStore: ObservableObject {
             try database.commit()
             playbackHistory.insert(entry, at: 0)
         } catch { errorMessage = "Couldn't save listening history: \(error.localizedDescription)" }
+    }
+
+    func tracks(in source: MusicSource, path: String = "") -> [Track] {
+        guard source.enabled else { return [] }
+        return sortedTracks.filter { track in
+            track.locations.contains { location in
+                location.sourceID == source.id && source.permits(location.relativePath) && location.relativePath.hasPrefix(path)
+            }
+        }
     }
 
     func track(_ id: String) -> Track? { trackLookup[id] }
@@ -312,6 +339,7 @@ final class LibraryStore: ObservableObject {
                 } catch is CancellationError { return }
                 catch { scanStatus = "Folder check unavailable. Use Rescan Library to retry." }
             }
+            if appleMusicEnabled { pendingAutomaticSources.insert(Self.appleMusicSourceID) }
             resumeAutomaticScan()
         }
     }
@@ -353,9 +381,12 @@ final class LibraryStore: ObservableObject {
     private func rescan(sourceIDs: Set<UUID>?, automatic: Bool = false) {
         guard !busy, database != nil else { return }
         let selected = sources.filter { $0.enabled && (sourceIDs == nil || sourceIDs!.contains($0.id)) }
-        guard !selected.isEmpty else { return }
-        if !automatic { discoveryTask?.cancel(); pendingAutomaticSources.subtract(selected.map(\.id)) }
-        automaticSources = automatic ? Set(selected.map(\.id)) : []
+        let shouldScanAppleMusic = appleMusicEnabled && (sourceIDs == nil || sourceIDs?.contains(Self.appleMusicSourceID) == true)
+        guard !selected.isEmpty || shouldScanAppleMusic else { return }
+        var activeIDs = Set(selected.map(\.id))
+        if shouldScanAppleMusic { activeIDs.insert(Self.appleMusicSourceID) }
+        if !automatic { discoveryTask?.cancel(); pendingAutomaticSources.subtract(activeIDs) }
+        automaticSources = automatic ? activeIDs : []
         scanRunCount += 1
         scanning = true; scannedCount = 0; scanStatus = "Preparing scan…"
         if sourceIDs == nil { lastScan = Date() }
@@ -408,6 +439,48 @@ final class LibraryStore: ObservableObject {
                     }
                     if updated != tracks { tracks = updated }
                     try? save(source); errorMessage = "\(source.name): \(error.localizedDescription)"
+                }
+            }
+            if shouldScanAppleMusic && !Task.isCancelled {
+                scanStatus = "Scanning Apple Music Library"
+                do {
+                    var authStatus = appleMusicProvider.authorizationStatus()
+                    if authStatus == .notDetermined {
+                        authStatus = await appleMusicProvider.requestAuthorization()
+                    }
+                    try Task.checkCancellation()
+                    if authStatus == .authorized {
+                        let items = appleMusicProvider.fetchTracks()
+                        let snapshot = trackLookup
+                        let completedCount = scannedCount
+                        let result = try await scanner.scanAppleMusic(items: items, sourceID: Self.appleMusicSourceID, existing: snapshot, cache: artworkDirectory, checked: { count in
+                            await self.updateScanCount(completedCount + count)
+                        }, progress: { batch, count in
+                            await self.receive(batch, count: completedCount + count)
+                        })
+                        try Task.checkCancellation()
+                        var updated = tracks
+                        var changed = false
+                        for index in updated.indices {
+                            guard !result.seen.contains(updated[index].id),
+                                  updated[index].locations.contains(where: { $0.sourceID == Self.appleMusicSourceID && $0.available }) else { continue }
+                            for location in updated[index].locations.indices where updated[index].locations[location].sourceID == Self.appleMusicSourceID {
+                                updated[index].locations[location].available = false
+                            }
+                            changed = true
+                            try database?.save(updated[index], key: "track:\(updated[index].id)", kind: "track")
+                        }
+                        if changed { tracks = updated }
+                        try database?.commit()
+                        scanStatus = "\(scannedCount) files checked\(result.skipped > 0 ? "; \(result.skipped) unavailable" : "")"
+                    } else {
+                        markAppleMusicLocationsUnavailable()
+                        errorMessage = "Apple Music library access is turned off. Enable Media & Apple Music in Settings → Privacy → Media & Apple Music."
+                    }
+                } catch is CancellationError {
+                    scanStatus = "Scan cancelled"
+                } catch {
+                    errorMessage = "Apple Music Library: \(error.localizedDescription)"
                 }
             }
             if artworkNeedsTrim { await trimArtwork(); artworkNeedsTrim = false }
@@ -463,6 +536,52 @@ final class LibraryStore: ObservableObject {
         guard !busy, var source = sources.first(where: { $0.id == id }) else { return }
         source.enabled = enabled; applyRestriction(source)
         if enabled { rescan(only: id) }
+    }
+    func setAppleMusicEnabled(_ enabled: Bool) {
+        guard !busy, enabled != appleMusicEnabled else { return }
+        if !enabled {
+            appleMusicEnabled = false
+            saveAppleMusicPreference(false)
+            markAppleMusicLocationsUnavailable()
+            return
+        }
+        Task {
+            var status = appleMusicProvider.authorizationStatus()
+            if status == .notDetermined {
+                status = await appleMusicProvider.requestAuthorization()
+            }
+            guard status == .authorized else {
+                appleMusicEnabled = false
+                saveAppleMusicPreference(false)
+                markAppleMusicLocationsUnavailable()
+                errorMessage = "Apple Music library access is turned off. Enable Media & Apple Music in Settings → Privacy → Media & Apple Music."
+                return
+            }
+            appleMusicEnabled = true
+            saveAppleMusicPreference(true)
+            rescan(only: Self.appleMusicSourceID)
+        }
+    }
+    private func saveAppleMusicPreference(_ enabled: Bool) {
+        do {
+            try database?.save(enabled, key: "appleMusicEnabled", kind: "appleMusicPreference")
+            try database?.commit()
+        } catch { errorMessage = error.localizedDescription }
+    }
+    private func markAppleMusicLocationsUnavailable() {
+        do {
+            var updated = tracks
+            for index in updated.indices {
+                for loc in updated[index].locations.indices where updated[index].locations[loc].sourceID == Self.appleMusicSourceID {
+                    updated[index].locations[loc].available = false
+                }
+                if updated[index] != tracks[index] {
+                    try database?.save(updated[index], key: "track:\(updated[index].id)", kind: "track")
+                }
+            }
+            if updated != tracks { tracks = updated }
+            try database?.commit()
+        } catch { errorMessage = error.localizedDescription }
     }
     func excludeFolder(_ url: URL, from id: UUID) {
         guard !busy, var source = sources.first(where: { $0.id == id }) else { return }
@@ -577,17 +696,114 @@ final class LibraryStore: ObservableObject {
             if let failure = failure { errorMessage = "Some artwork could not be cleared: \(failure)" }
         } catch { errorMessage = "Couldn't update the artwork cache: \(error.localizedDescription)" }
     }
-    private func trimArtwork() async {
+    @discardableResult
+    func trimArtwork(limit: Int = LibraryStore.artworkCacheLimitBytes) async -> Set<String> {
         let directory = artworkDirectory
         let used = Set(tracks.compactMap(\.artwork))
-        await Task.detached(priority: .utility) {
-            let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-            var total = 0
-            for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-                let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                if !used.contains(file.lastPathComponent) || total + size > 50_000_000 { try? FileManager.default.removeItem(at: file) }
-                else { total += size }
+        let accessTimes = ThumbnailLoader.shared.snapshotAccessTimes()
+        let evicted = await Task.detached(priority: .utility) { () -> Set<String> in
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]
+            )) ?? []
+            var candidates: [(url: URL, name: String, size: Int, lastUsed: Date)] = []
+            var removed = Set<String>()
+            for file in files {
+                let name = file.lastPathComponent
+                guard used.contains(name) else {
+                    try? FileManager.default.removeItem(at: file)
+                    removed.insert(name)
+                    continue
+                }
+                let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let size = values?.fileSize ?? 0
+                let diskDate = values?.contentModificationDate ?? .distantPast
+                let memoryDate = accessTimes[name] ?? .distantPast
+                candidates.append((file, name, size, max(diskDate, memoryDate)))
             }
+            // Sort Most Recently Used (MRU) first so Least Recently Used (LRU) files are evicted when over the limit.
+            candidates.sort { lhs, rhs in
+                if lhs.lastUsed != rhs.lastUsed { return lhs.lastUsed > rhs.lastUsed }
+                return lhs.name < rhs.name
+            }
+            var total = 0
+            for candidate in candidates {
+                if total + candidate.size <= limit {
+                    total += candidate.size
+                } else {
+                    try? FileManager.default.removeItem(at: candidate.url)
+                    removed.insert(candidate.name)
+                }
+            }
+            return removed
         }.value
+        if !evicted.isEmpty {
+            ThumbnailLoader.shared.removeEvicted(evicted, in: directory)
+        }
+        return evicted
+    }
+
+    /// Re-parses a song's embedded artwork on demand when its cached thumbnail was evicted by the LRU cache limit
+    /// or cleared by the user, promoting the newly extracted cover to Most Recently Used.
+    func restoreArtworkIfNeeded(for track: Track, cacheLimit: Int = LibraryStore.artworkCacheLimitBytes) async {
+        guard !clearingArtwork, !artworkRestoreInFlight.contains(track.id) else { return }
+        let current = trackLookup[track.id] ?? track
+        if let existingName = current.artwork {
+            let path = artworkDirectory.appendingPathComponent(existingName).path
+            if FileManager.default.fileExists(atPath: path) {
+                ThumbnailLoader.shared.touch(existingName)
+                return
+            }
+        } else if !current.fingerprint.isEmpty {
+            // Track was already scanned and has no embedded artwork.
+            return
+        }
+        artworkRestoreInFlight.insert(track.id)
+        defer { artworkRestoreInFlight.remove(track.id) }
+
+        var restoredName: String?
+        for location in current.locations where location.available {
+            if location.sourceID == Self.appleMusicSourceID {
+                guard appleMusicEnabled else { continue }
+                if current.id.hasPrefix("apple-music:"),
+                   let pid = UInt64(current.id.dropFirst("apple-music:".count)),
+                   let item = appleMusicProvider.fetchTracks().first(where: { $0.persistentID == pid }),
+                   let data = item.artworkData?(),
+                   let extracted = try? LibraryScanner.writeThumbnail(from: data, to: artworkDirectory) {
+                    restoredName = extracted
+                    break
+                }
+                let resolvedURL = location.relativePath.hasPrefix("/")
+                    ? URL(fileURLWithPath: location.relativePath)
+                    : URL(string: location.relativePath)
+                if let url = resolvedURL {
+                    restoredName = await scanner.extractArtwork(from: url, cache: artworkDirectory)
+                    if restoredName != nil { break }
+                }
+                continue
+            }
+            guard let source = sources.first(where: { $0.id == location.sourceID }),
+                  source.permits(location.relativePath),
+                  let root = try? sourceURL(source) else { continue }
+            let access = root.startAccessingSecurityScopedResource()
+            defer { if access { root.stopAccessingSecurityScopedResource() } }
+            guard let file = try? LocalFilePolicy.musicFile(location.relativePath, in: root) else { continue }
+            if let extracted = await scanner.extractArtwork(from: file, cache: artworkDirectory) {
+                restoredName = extracted
+                break
+            }
+        }
+
+        guard let filename = restoredName else { return }
+        ThumbnailLoader.shared.touch(filename)
+        if let index = tracks.firstIndex(where: { $0.id == track.id }), tracks[index].artwork != filename {
+            var updated = tracks
+            updated[index].artwork = filename
+            try? database?.save(updated[index], key: "track:\(updated[index].id)", kind: "track")
+            try? database?.commit()
+            tracks = updated
+        }
+        artworkRevision &+= 1
+        _ = await trimArtwork(limit: cacheLimit)
     }
 }

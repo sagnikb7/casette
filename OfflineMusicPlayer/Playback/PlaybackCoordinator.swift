@@ -42,6 +42,7 @@ final class PlaybackCoordinator: ObservableObject {
     private var shouldResume = false
     private var artwork: MPMediaItemArtwork?
     private var widgetTask: Task<Void, Never>?
+    private var pendingWidgetForceReload = false
     private var widgetLibrarySubscription: AnyCancellable?
     private var lastSaved = Date.distantPast
 
@@ -72,11 +73,20 @@ final class PlaybackCoordinator: ObservableObject {
         if let state = try? library.database?.all("playback", as: PlaybackSnapshot.self).first,
            state.index >= 0 {
             shuffle = state.shuffle; repeatMode = state.repeatMode
-            guard !state.queue.isEmpty, state.queue.indices.contains(state.index) else { return }
-            queue = state.queue; queueIndex = state.index
-            if let track = library.track(queue[queueIndex]) {
-                currentTrack = track; duration = track.duration; position = (preferences.object(forKey: "rememberPlaybackPosition") as? Bool ?? true) ? max(0, min(state.position, duration)) : 0
+            if !state.queue.isEmpty, state.queue.indices.contains(state.index) {
+                queue = state.queue; queueIndex = state.index
+                if let track = library.track(queue[queueIndex]) {
+                    currentTrack = track
+                    duration = track.duration
+                    position = (preferences.object(forKey: "rememberPlaybackPosition") as? Bool ?? true) ? max(0, min(state.position, duration)) : 0
+                    loadArtwork(track)
+                }
             }
+        }
+        if currentTrack == nil, let recent = library.recentlyPlayed.first?.track {
+            queue = [recent.id]; queueIndex = 0
+            currentTrack = recent; duration = recent.duration; position = 0
+            loadArtwork(recent)
         }
     }
     func play(_ tracks: [Track], startingAt track: Track? = nil, shuffled: Bool = false) {
@@ -154,6 +164,19 @@ final class PlaybackCoordinator: ObservableObject {
         guard let library = library else { throw PlaybackError.decoderFailed }
         var lastError: Error = CocoaError(.fileReadNoSuchFile)
         for location in track.locations where location.available {
+            if location.sourceID == LibraryStore.appleMusicSourceID {
+                guard library.appleMusicEnabled else { continue }
+                let resolvedURL = location.relativePath.hasPrefix("/")
+                    ? URL(fileURLWithPath: location.relativePath)
+                    : URL(string: location.relativePath)
+                guard let url = resolvedURL,
+                      url.isFileURL || url.scheme?.lowercased() == "ipod-library" else { continue }
+                do {
+                    try engine.load(url)
+                    return
+                } catch { lastError = error; releaseAccess() }
+                continue
+            }
             guard let source = library.sources.first(where: { $0.id == location.sourceID }),
                   source.permits(location.relativePath) else { continue }
             do {
@@ -170,26 +193,44 @@ final class PlaybackCoordinator: ObservableObject {
     }
     func refreshWidgets() { publishWidget(forceReload: true) }
     private func publishWidget(forceReload: Bool = false) {
-        let track = currentTrack.flatMap { library?.track($0.id) } ?? currentTrack
-        let artworkURL = track?.artwork.flatMap { name in library?.artworkDirectory.appendingPathComponent(name) }
+        if forceReload { pendingWidgetForceReload = true }
+        let effectiveForce = pendingWidgetForceReload
+        let initialTrack = currentTrack.flatMap { library?.track($0.id) } ?? currentTrack ?? library?.recentlyPlayed.first?.track
+        let libraryRef = library
         widgetTask?.cancel()
         widgetTask = Task {
             do {
-                let changed = try await WidgetSnapshotStore.shared.publish(title: track?.title ?? "", artist: track?.displayArtist ?? "", artwork: artworkURL, force: forceReload)
+                if let track = initialTrack, let libraryRef = libraryRef {
+                    let hasCachedCover = track.artwork.map { FileManager.default.fileExists(atPath: libraryRef.artworkDirectory.appendingPathComponent($0).path) } ?? false
+                    if !hasCachedCover {
+                        await libraryRef.restoreArtworkIfNeeded(for: track)
+                    }
+                }
                 guard !Task.isCancelled else { return }
-                if changed || forceReload { WidgetCenter.shared.reloadTimelines(ofKind: CassetteWidgetConfiguration.kind) }
+                let track = initialTrack.flatMap { libraryRef?.track($0.id) } ?? initialTrack
+                let artworkURL = track?.artwork.flatMap { name in libraryRef?.artworkDirectory.appendingPathComponent(name) }
+                let changed = try await WidgetSnapshotStore.shared.publish(title: track?.title ?? "", artist: track?.displayArtist ?? "", artwork: artworkURL, force: effectiveForce)
+                guard !Task.isCancelled else { return }
+                pendingWidgetForceReload = false
+                if changed || effectiveForce {
+                    WidgetCenter.shared.reloadTimelines(ofKind: CassetteWidgetConfiguration.kind)
+                    WidgetCenter.shared.reloadAllTimelines()
+                }
                 #if targetEnvironment(macCatalyst)
                 widgetStatus = "Home Screen widgets are available on iPod/iPhone. Mac previews do not use shared widget storage."
                 #else
-                widgetStatus = CassetteWidgetConfiguration.directory == nil
+                widgetStatus = (CassetteWidgetConfiguration.directory == nil && CassetteWidgetConfiguration.sharedDefaults == nil)
                     ? "Shared widget storage is unavailable. The app and widget must be signed with the same provisioned App Group. Reinstall a correctly signed package to share song details."
                     : "Shared widget data is ready. iOS controls when the Home Screen refreshes."
                 #endif
             } catch is CancellationError { }
             catch {
                 guard !Task.isCancelled else { return }
-                widgetStatus = "Couldn't update shared widget data. Unlock your iPod and try Refresh Widgets again. (\((error as NSError).domain) \((error as NSError).code))"
-                if forceReload { WidgetCenter.shared.reloadTimelines(ofKind: CassetteWidgetConfiguration.kind) }
+                widgetStatus = "Couldn't update shared widget data. Unlock your device and try Refresh Widgets again. (\((error as NSError).domain) \((error as NSError).code))"
+                if effectiveForce {
+                    WidgetCenter.shared.reloadTimelines(ofKind: CassetteWidgetConfiguration.kind)
+                    WidgetCenter.shared.reloadAllTimelines()
+                }
             }
         }
     }
@@ -247,7 +288,7 @@ final class PlaybackCoordinator: ObservableObject {
         var remaining = max(0, duration - (engine.duration > 0 ? engine.currentTime : position))
         for id in queue.dropFirst(queueIndex + 1) {
             guard let track = library?.track(id), track.available,
-                  track.locations.contains(where: { location in library?.sources.contains(where: { $0.id == location.sourceID && $0.permits(location.relativePath) && location.available }) == true }) else { continue }
+                  track.locations.contains(where: { location in location.available && library?.permitsLocation(location) == true }) else { continue }
             guard track.duration.isFinite, track.duration > 0 else { return nil }
             remaining += track.duration
         }
@@ -335,8 +376,20 @@ final class PlaybackCoordinator: ObservableObject {
     private func loadArtwork(_ track: Track) {
         artwork = nil
         if let name = track.artwork, let folder = library?.artworkDirectory,
-           let image = UIImage(contentsOfFile: folder.appendingPathComponent(name).path) {
+           let image = ThumbnailLoader.shared.image(folder.appendingPathComponent(name).path) {
             artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            return
+        }
+        Task { [weak self] in
+            guard let self = self, let library = self.library else { return }
+            await library.restoreArtworkIfNeeded(for: track)
+            guard self.currentTrack?.id == track.id,
+                  let refreshed = library.track(track.id),
+                  let name = refreshed.artwork,
+                  let image = ThumbnailLoader.shared.image(library.artworkDirectory.appendingPathComponent(name).path) else { return }
+            self.artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            self.updateNowPlaying()
+            self.publishWidget()
         }
     }
     private func updateNowPlaying() {

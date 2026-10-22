@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import Combine
+import MediaPlayer
 @testable import OfflineMusicPlayer
 
 final class PlayerPolishTests: XCTestCase {
@@ -98,6 +99,7 @@ final class PlayerPolishTests: XCTestCase {
         let reused = await cache.image(at: url)
         XCTAssertTrue(first === reused, "Repeated playback updates must not regenerate the blur")
         XCTAssertLessThanOrEqual(first.size.width, 64); XCTAssertLessThanOrEqual(first.size.height, 64)
+        XCTAssertEqual(ArtworkSurface.darkModeSaturation, 1.25, accuracy: 0.001)
         let missing = await cache.image(at: root.appendingPathComponent("missing.png"))
         XCTAssertNil(missing)
     }
@@ -121,6 +123,7 @@ final class PlayerPolishTests: XCTestCase {
         library.rescan(); try await waitForScan(library)
         XCTAssertEqual(publications, 0, "Unchanged scans should not refresh every song row")
         await library.clearArtwork()
+        XCTAssertEqual(LibraryStore.artworkCacheLimitBytes, 200_000_000)
         XCTAssertFalse(library.busy)
         XCTAssertTrue(try XCTUnwrap(library.track(track.id)).favorite)
         XCTAssertEqual(library.sortedTracks.map(\.id), [track.id])
@@ -350,15 +353,29 @@ final class PlayerPolishTests: XCTestCase {
         XCTAssertEqual(dragOffset, 0, "Re-opening NowPlayingView must reset any residual dismissDragOffset so the sheet expands all the way to the top")
 
         let lightHost = UIHostingController(rootView: NowPlayingView().environmentObject(library).environmentObject(player))
+        parent.addChild(lightHost); parent.view.addSubview(lightHost.view); lightHost.didMove(toParent: parent)
+        defer { lightHost.willMove(toParent: nil); lightHost.view.removeFromSuperview(); lightHost.removeFromParent() }
         lightHost.overrideUserInterfaceStyle = .light
+        lightHost.additionalSafeAreaInsets = UIEdgeInsets(top: 44, left: 0, bottom: 34, right: 0)
         lightHost.view.frame = bounds
+        lightHost.beginAppearanceTransition(true, animated: false); lightHost.endAppearanceTransition()
         lightHost.view.setNeedsLayout(); lightHost.view.layoutIfNeeded()
         try await Task.sleep(nanoseconds: 100_000_000)
         let lightImage = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
             lightHost.view.drawHierarchy(in: bounds, afterScreenUpdates: true)
         }
         XCTAssertEqual(lightImage.size.width, 320); XCTAssertEqual(lightImage.size.height, 548)
-        try XCTUnwrap(lightImage.pngData()).write(to: URL(fileURLWithPath: "/tmp/Cassette-player-light-320x548.png"))
+        let lightPNG = try XCTUnwrap(lightImage.pngData())
+        try lightPNG.write(to: URL(fileURLWithPath: "/tmp/Cassette-player-light-320x548.png"))
+        if let cgImage = UIImage(data: lightPNG)?.cgImage,
+           let providerData = cgImage.dataProvider?.data,
+           let ptr = CFDataGetBytePtr(providerData) {
+            let bpp = cgImage.bitsPerPixel / 8
+            let bpr = cgImage.bytesPerRow
+            let statusBarPixelOffset = 10 * bpr + 160 * bpp
+            let bodyPixelOffset = 60 * bpr + 160 * bpp
+            XCTAssertEqual(ptr[statusBarPixelOffset], ptr[bodyPixelOffset], accuracy: 4, "ArtworkSurface must extend into the top status bar safe area instead of being clipped by TopRoundedRectangle")
+        }
 
         let rootHost = UIHostingController(rootView: RootView().environmentObject(library).environmentObject(player))
         rootHost.overrideUserInterfaceStyle = .dark
@@ -460,5 +477,208 @@ final class PlayerPolishTests: XCTestCase {
         menuHost.view.layoutIfNeeded()
         XCTAssertNotNil(menuHost.view)
         XCTAssertNil(selectedArtist)
+    }
+
+    @MainActor
+    func testAppleMusicLibraryToggleScansSkipsProtectedTracksAndPlays() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "TestTone", withExtension: "wav"))
+
+        struct MockAppleMusicLibrary: AppleMusicLibraryProviding {
+            var status: MPMediaLibraryAuthorizationStatus
+            var items: [AppleMusicTrackItem]
+            func authorizationStatus() -> MPMediaLibraryAuthorizationStatus { status }
+            func requestAuthorization() async -> MPMediaLibraryAuthorizationStatus { status }
+            func fetchTracks() -> [AppleMusicTrackItem] { items }
+        }
+
+        let deniedLibrary = LibraryStore(
+            documents: root.appendingPathComponent("Denied"),
+            inMemory: true,
+            appleMusicProvider: MockAppleMusicLibrary(status: .denied, items: [])
+        )
+        XCTAssertFalse(deniedLibrary.appleMusicEnabled)
+        deniedLibrary.setAppleMusicEnabled(true)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(deniedLibrary.appleMusicEnabled)
+        XCTAssertTrue(deniedLibrary.errorMessage?.contains("Media & Apple Music") == true)
+
+        let items = [
+            AppleMusicTrackItem(
+                persistentID: 1001,
+                title: "Synced Sunset",
+                artist: "The Midnight; Uppermost",
+                albumArtist: "The Midnight",
+                album: "Endless Summer",
+                genre: "Synthwave",
+                duration: 12,
+                trackNumber: 2,
+                discNumber: 1,
+                assetURL: fixture,
+                isCloudItem: false,
+                hasProtectedAsset: false,
+                lyrics: "[00:01.00]Waiting for the sunset"
+            ),
+            AppleMusicTrackItem(
+                persistentID: 1002,
+                title: "DRM Protected Song",
+                artist: "Protected Artist",
+                albumArtist: "Protected Artist",
+                album: "Protected Album",
+                genre: "Pop",
+                duration: 180,
+                trackNumber: 1,
+                discNumber: 1,
+                assetURL: fixture,
+                isCloudItem: false,
+                hasProtectedAsset: true
+            ),
+            AppleMusicTrackItem(
+                persistentID: 1003,
+                title: "Cloud Only Song",
+                artist: "Cloud Artist",
+                albumArtist: "Cloud Artist",
+                album: "Cloud Album",
+                genre: "Pop",
+                duration: 200,
+                trackNumber: 3,
+                discNumber: 1,
+                assetURL: nil,
+                isCloudItem: true,
+                hasProtectedAsset: false
+            )
+        ]
+
+        let storeURL = root.appendingPathComponent("AppleMusic.sqlite")
+        let docsURL = root.appendingPathComponent("Docs")
+        let library = LibraryStore(
+            documents: docsURL,
+            databaseURL: storeURL,
+            appleMusicProvider: MockAppleMusicLibrary(status: .authorized, items: items)
+        )
+        XCTAssertFalse(library.appleMusicEnabled)
+        library.setAppleMusicEnabled(true)
+        for _ in 0..<20 {
+            if library.appleMusicEnabled { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await waitForScan(library)
+
+        XCTAssertTrue(library.appleMusicEnabled)
+        XCTAssertEqual(library.visibleTracks.map(\.title), ["Synced Sunset"])
+        let syncedTrack = try XCTUnwrap(library.visibleTracks.first)
+        XCTAssertEqual(syncedTrack.id, "apple-music:1001")
+        XCTAssertEqual(syncedTrack.artistList, ["The Midnight", "Uppermost"])
+        XCTAssertEqual(syncedTrack.lyrics, "[00:01.00]Waiting for the sunset")
+
+        library.favorite(syncedTrack)
+        XCTAssertTrue(try XCTUnwrap(library.track(syncedTrack.id)).favorite)
+
+        let player = PlaybackCoordinator()
+        player.connect(library)
+        player.play(library.sortedTracks)
+        try await waitForPlayback(player)
+        XCTAssertEqual(player.currentTrack?.id, syncedTrack.id)
+        player.pause()
+
+        // Turning off the toggle hides Apple Music tracks while keeping favorites intact.
+        library.setAppleMusicEnabled(false)
+        XCTAssertFalse(library.appleMusicEnabled)
+        XCTAssertTrue(library.visibleTracks.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(library.track(syncedTrack.id)).favorite)
+
+        // Turning it back on restores the track and persists the toggle state across store launches.
+        library.setAppleMusicEnabled(true)
+        for _ in 0..<20 {
+            if library.appleMusicEnabled { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await waitForScan(library)
+        XCTAssertEqual(library.visibleTracks.map(\.id), [syncedTrack.id])
+        XCTAssertTrue(try XCTUnwrap(library.visibleTracks.first).favorite)
+
+        let reopened = LibraryStore(
+            documents: docsURL,
+            databaseURL: storeURL,
+            appleMusicProvider: MockAppleMusicLibrary(status: .authorized, items: items)
+        )
+        XCTAssertTrue(reopened.appleMusicEnabled)
+        XCTAssertEqual(reopened.visibleTracks.map(\.id), [syncedTrack.id])
+    }
+
+    @MainActor
+    func testArtworkLRUEvictionDeduplicationAndOnDemandRestore() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "TestTone", withExtension: "wav"))
+
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let redCover = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 240, height: 240), format: format).image { ctx in
+            UIColor.systemRed.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 240, height: 240))
+        }.jpegData(compressionQuality: 0.9))
+        let blueCover = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 240, height: 240), format: format).image { ctx in
+            UIColor.systemBlue.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 240, height: 240))
+        }.jpegData(compressionQuality: 0.9))
+
+        struct MockAppleMusicLibrary: AppleMusicLibraryProviding {
+            var items: [AppleMusicTrackItem]
+            func authorizationStatus() -> MPMediaLibraryAuthorizationStatus { .authorized }
+            func requestAuthorization() async -> MPMediaLibraryAuthorizationStatus { .authorized }
+            func fetchTracks() -> [AppleMusicTrackItem] { items }
+        }
+
+        // Tracks 1 and 2 share the exact same album cover (redCover); Track 3 has a distinct cover (blueCover).
+        let items = [
+            AppleMusicTrackItem(persistentID: 2001, title: "Alpha", artist: "Artist", albumArtist: "Artist", album: "Red Album", genre: "Synth", duration: 12, trackNumber: 1, discNumber: 1, assetURL: fixture, artworkData: { redCover }),
+            AppleMusicTrackItem(persistentID: 2002, title: "Beta", artist: "Artist", albumArtist: "Artist", album: "Red Album", genre: "Synth", duration: 12, trackNumber: 2, discNumber: 1, assetURL: fixture, artworkData: { redCover }),
+            AppleMusicTrackItem(persistentID: 2003, title: "Gamma", artist: "Artist", albumArtist: "Artist", album: "Blue Album", genre: "Synth", duration: 12, trackNumber: 1, discNumber: 1, assetURL: fixture, artworkData: { blueCover })
+        ]
+
+        ThumbnailLoader.shared.clear()
+        let library = LibraryStore(
+            documents: root.appendingPathComponent("Docs"),
+            inMemory: true,
+            appleMusicProvider: MockAppleMusicLibrary(items: items)
+        )
+        library.setAppleMusicEnabled(true)
+        for _ in 0..<20 {
+            if library.appleMusicEnabled { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await waitForScan(library)
+
+        let alpha = try XCTUnwrap(library.visibleTracks.first { $0.title == "Alpha" })
+        let beta = try XCTUnwrap(library.visibleTracks.first { $0.title == "Beta" })
+        let gamma = try XCTUnwrap(library.visibleTracks.first { $0.title == "Gamma" })
+
+        let redName = try XCTUnwrap(alpha.artwork)
+        let blueName = try XCTUnwrap(gamma.artwork)
+        XCTAssertEqual(alpha.artwork, beta.artwork, "Identical album covers should be content-addressed and deduplicated on disk")
+        XCTAssertNotEqual(redName, blueName)
+
+        let redURL = library.artworkDirectory.appendingPathComponent(redName)
+        let blueURL = library.artworkDirectory.appendingPathComponent(blueName)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: redURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: blueURL.path))
+
+        let redSize = try XCTUnwrap((try? redURL.resourceValues(forKeys: [.fileSizeKey]).fileSize))
+        let blueSize = try XCTUnwrap((try? blueURL.resourceValues(forKeys: [.fileSizeKey]).fileSize))
+        let singleCoverBudget = max(redSize, blueSize)
+
+        // Mark redName as Older and access blueName via ThumbnailLoader so blueName is Most Recently Used (MRU).
+        ThumbnailLoader.shared.touch(redName, at: Date(timeIntervalSinceNow: -120))
+        _ = ThumbnailLoader.shared.image(blueURL.path)
+
+        let evictedFirst = await library.trimArtwork(limit: singleCoverBudget)
+        XCTAssertEqual(evictedFirst, [redName], "LRU trim must evict the least recently used cover and keep the most recently used cover")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: redURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: blueURL.path))
+
+        // Viewing or playing Alpha on demand must re-parse its evicted artwork, promote redName to MRU, and evict blueName under the single-cover budget.
+        await library.restoreArtworkIfNeeded(for: alpha, cacheLimit: singleCoverBudget)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: redURL.path), "On-demand restore must re-parse and cache the evicted cover")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: blueURL.path), "Restoring redName into a 1-cover budget must evict the older blueName")
+        XCTAssertNotNil(ThumbnailLoader.shared.image(redURL.path))
     }
 }

@@ -123,4 +123,56 @@ final class WidgetTests: XCTestCase {
             try XCTUnwrap(image.pngData()).write(to: URL(fileURLWithPath: "/tmp/Cassette-widget-\(name).png"))
         }
     }
+
+    func testProvisionedAppGroupExtractionAndUserDefaultsFallback() async throws {
+        let cmsPrefix = Data([0x30, 0x82, 0x01, 0x00])
+        let plistXML = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Entitlements</key>
+            <dict>
+                <key>com.apple.security.application-groups</key>
+                <array>
+                    <string>group.com.local.offlinemusicplayer.TEAM123</string>
+                </array>
+            </dict>
+        </dict>
+        </plist>
+        """.data(using: .utf8)!
+        let cmsSuffix = Data([0x00, 0x00])
+        let mobileprovision = cmsPrefix + plistXML + cmsSuffix
+        XCTAssertEqual(
+            CassetteWidgetConfiguration.extractAppGroups(from: mobileprovision),
+            ["group.com.local.offlinemusicplayer.TEAM123"]
+        )
+        let candidates = CassetteWidgetConfiguration.candidateAppGroups()
+        XCTAssertTrue(candidates.contains(CassetteWidgetConfiguration.appGroup))
+
+        let suiteName = "CassetteWidgetTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("cover.jpg")
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 240, height: 120), format: format).image { ctx in
+            UIColor.systemBlue.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 240, height: 120))
+        }
+        try XCTUnwrap(image.jpegData(compressionQuality: 0.8)).write(to: source)
+
+        let store = WidgetSnapshotStore(directory: nil, defaults: defaults)
+        let published = try await store.publish(title: "Sideloaded Song", artist: "Sideloaded Artist", artwork: source)
+        XCTAssertTrue(published)
+
+        let restored = CassetteWidgetConfiguration.read(from: nil, defaults: defaults)
+        XCTAssertEqual(restored.title, "Sideloaded Song")
+        XCTAssertEqual(restored.artist, "Sideloaded Artist")
+        XCTAssertNotNil(restored.artworkName)
+        let restoredImage = CassetteWidgetConfiguration.artwork(for: restored, in: nil, defaults: defaults)
+        XCTAssertNotNil(restoredImage)
+    }
 }

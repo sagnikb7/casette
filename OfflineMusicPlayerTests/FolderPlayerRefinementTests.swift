@@ -239,4 +239,53 @@ final class FolderPlayerRefinementTests: XCTestCase {
         XCTAssertEqual(library.sources.first { !$0.isOwned }?.id, externalSource.id)
         XCTAssertEqual(library.sources.first { !$0.isOwned }?.needsReconnect, false)
     }
+
+    @MainActor
+    func testFolderAndSubfolderPlayIncludesRecursiveTracks() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let owned = root.appendingPathComponent("App")
+        let subA = owned.appendingPathComponent("AlbumA")
+        let subB = owned.appendingPathComponent("AlbumA/Disc2")
+        try FileManager.default.createDirectory(at: subB, withIntermediateDirectories: true)
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "TestTone", withExtension: "wav"))
+        try FileManager.default.copyItem(at: fixture, to: owned.appendingPathComponent("01 RootSong.wav"))
+        try FileManager.default.copyItem(at: fixture, to: subA.appendingPathComponent("02 SubSong.wav"))
+        try FileManager.default.copyItem(at: fixture, to: subB.appendingPathComponent("03 DeepSong.wav"))
+
+        let library = LibraryStore(documents: owned, inMemory: true)
+        library.rescan(); try await waitForScan(library)
+        let source = try XCTUnwrap(library.sources.first { $0.isOwned })
+        let allFolderTracks = library.tracks(in: source)
+        XCTAssertEqual(allFolderTracks.count, 3, "Root folder query must include direct songs and all nested subfolder songs")
+        let subfolderTracks = library.tracks(in: source, path: "AlbumA/")
+        XCTAssertEqual(subfolderTracks.count, 2, "Subfolder query must include songs in AlbumA and AlbumA/Disc2")
+        let deepTracks = library.tracks(in: source, path: "AlbumA/Disc2/")
+        XCTAssertEqual(deepTracks.count, 1)
+
+        let playback = PlaybackCoordinator(); playback.connect(library)
+        defer { playback.pause() }
+        playback.play(allFolderTracks)
+        XCTAssertEqual(playback.queue.count, 3)
+
+        let foldersHost = UIHostingController(
+            rootView: NavigationView { FoldersView() }
+                .navigationViewStyle(.stack)
+                .environmentObject(library)
+                .environmentObject(playback)
+        )
+        foldersHost.view.frame = CGRect(x: 0, y: 0, width: 320, height: 548)
+        foldersHost.view.layoutIfNeeded()
+        XCTAssertNotNil(foldersHost.view)
+
+        let contentsHost = UIHostingController(
+            rootView: NavigationView { FolderContentsView(source: source, path: "") }
+                .navigationViewStyle(.stack)
+                .environmentObject(library)
+                .environmentObject(playback)
+        )
+        contentsHost.view.frame = CGRect(x: 0, y: 0, width: 320, height: 548)
+        contentsHost.view.layoutIfNeeded()
+        XCTAssertNotNil(contentsHost.view)
+    }
 }

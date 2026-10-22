@@ -214,10 +214,14 @@ private struct NowPlayingContent: View {
 
     private var sheet: some View {
         ZStack {
-            ArtworkSurface(artworkURL: currentTrack?.artwork.map { library.artworkDirectory.appendingPathComponent($0) })
+            ArtworkSurface(
+                artworkURL: currentTrack?.artwork.map { library.artworkDirectory.appendingPathComponent($0) },
+                revision: library.artworkRevision
+            )
                 .clipShape(TopRoundedRectangle(radius: reduceMotion ? 0 : sheetCornerRadius))
                 .modifier(SheetChromeSlideModifier(dragOffset: dismissDragOffset))
                 .transition(reduceMotion ? .opacity : .sheetChromeSlide(distance: 220))
+                .ignoresSafeArea()
             VStack(spacing: 0) {
                 if !reduceMotion {
                     grabber

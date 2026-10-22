@@ -18,16 +18,18 @@ struct CassetteProvider: TimelineProvider {
     }
     private func entry() -> CassetteEntry {
         let directory = CassetteWidgetConfiguration.directory
-        let snapshot = CassetteWidgetConfiguration.read(from: directory)
-        let image = CassetteWidgetConfiguration.artwork(for: snapshot, in: directory)
+        let defaults = CassetteWidgetConfiguration.sharedDefaults
+        let snapshot = CassetteWidgetConfiguration.read(from: directory, defaults: defaults)
+        let image = CassetteWidgetConfiguration.artwork(for: snapshot, in: directory, defaults: defaults)
         return CassetteEntry(date: Date(), snapshot: snapshot, artwork: image)
     }
 }
 struct CassetteEntryView: View {
     var entry: CassetteEntry
+    var showsBackground: Bool = true
     @Environment(\.widgetFamily) private var family
     var body: some View {
-        CassetteWidgetCard(snapshot: entry.snapshot, artwork: entry.artwork, square: family == .systemSmall)
+        CassetteWidgetCard(snapshot: entry.snapshot, artwork: entry.artwork, square: family == .systemSmall, showsBackground: showsBackground)
             .widgetURL(entry.snapshot.hasTrack ? CassetteWidgetConfiguration.playerURL : CassetteWidgetConfiguration.libraryURL)
     }
 }
@@ -37,8 +39,11 @@ struct CassetteWidget: Widget {
     private var configuration: some WidgetConfiguration {
         StaticConfiguration(kind: CassetteWidgetConfiguration.kind, provider: CassetteProvider()) { entry in
             if #available(iOSApplicationExtension 17.0, *) {
-                CassetteEntryView(entry: entry).containerBackground(for: .widget) { Color(red: 0.08, green: 0.09, blue: 0.11) }
-            } else { CassetteEntryView(entry: entry) }
+                CassetteEntryView(entry: entry, showsBackground: false)
+                    .containerBackground(for: .widget) { CassetteWidgetCard.backgroundColor }
+            } else {
+                CassetteEntryView(entry: entry, showsBackground: true)
+            }
         }.configurationDisplayName("Cassette")
             .description("Your last-played music, one tap away.")
             .supportedFamilies([.systemSmall, .systemMedium])

@@ -1,17 +1,20 @@
 import SwiftUI
 import UIKit
+import WidgetKit
 
 /// Shared native content for WidgetKit and in-app previews. No timers, blur, network or database access.
 struct CassetteWidgetCard: View {
+    static let backgroundColor = Color(red: 0.08, green: 0.09, blue: 0.11)
     var snapshot: WidgetSnapshot
     var artwork: UIImage?
     var square: Bool
+    var showsBackground: Bool = true
     var body: some View {
-        Group {
+        let card = Group {
             if square {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(alignment: .top) {
-                        cover.frame(width: 58, height: 58)
+                        cover(size: 58)
                         Spacer(minLength: 4)
                         brand
                     }
@@ -22,7 +25,7 @@ struct CassetteWidgetCard: View {
                 }.padding(12)
             } else {
                 HStack(spacing: 14) {
-                    cover.frame(width: 100, height: 100)
+                    cover(size: 100)
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(snapshot.hasTrack ? "LAST PLAYED" : "YOUR MUSIC").font(.system(size: 9, weight: .semibold)).foregroundColor(.white.opacity(0.55))
@@ -38,16 +41,40 @@ struct CassetteWidgetCard: View {
                 }.padding(14)
             }
         }.foregroundColor(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(red: 0.08, green: 0.09, blue: 0.11))
-            .accessibilityElement(children: .combine)
+        Group {
+            if showsBackground {
+                card.background(Self.backgroundColor)
+            } else {
+                card
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
     private var brand: some View {
-        Image("CassetteMark").resizable().scaledToFit().frame(width: 20, height: 20).cornerRadius(4).accessibilityHidden(true)
+        fullColorImage(Image("CassetteMark")).scaledToFit().frame(width: 20, height: 20).cornerRadius(4).accessibilityHidden(true)
     }
-    private var cover: some View {
+    private func cover(size: CGFloat) -> some View {
         Group {
-            if let artwork = artwork { Image(uiImage: artwork).resizable().scaledToFill() }
-            else { ZStack { Color.white.opacity(0.06); Image(systemName: "music.note").font(.system(size: 24, weight: .medium)).foregroundColor(.white.opacity(0.5)) } }
-        }.clipped().cornerRadius(9).accessibilityHidden(true)
+            if let artwork = artwork {
+                fullColorImage(Image(uiImage: artwork)).scaledToFill()
+            } else {
+                ZStack {
+                    Color.white.opacity(0.06)
+                    Image(systemName: "music.note").font(.system(size: 24, weight: .medium)).foregroundColor(.white.opacity(0.5))
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipped()
+        .cornerRadius(9)
+        .accessibilityHidden(true)
+    }
+    @ViewBuilder
+    private func fullColorImage(_ image: Image) -> some View {
+        if #available(iOS 18.0, iOSApplicationExtension 18.0, *) {
+            image.renderingMode(.original).resizable().widgetAccentedRenderingMode(.fullColor)
+        } else {
+            image.renderingMode(.original).resizable()
+        }
     }
 }
