@@ -6,6 +6,14 @@ Every user-facing feature or fix is recorded here when its release build succeed
 
 The build workflow moves pending feature/fix notes into a dated release section after successful packaging.
 
+## 1.7.5 — 22 October 2026
+
+Build: 35.
+
+### Changed
+
+- Updated the app icon, README icon, and widget brand marks to the new retro cassette logo (`docs/design/assets/casette_retro.png`).
+
 ## 1.7.4 — 22 October 2026
 
 Build: 34.

@@ -13,7 +13,7 @@
 </p>
 
 [![CI](https://github.com/sagnikb7/casette/actions/workflows/ci.yml/badge.svg)](https://github.com/sagnikb7/casette/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.7.4-FF6338?style=flat-square)](docs/product/changelog.md)
+[![Version](https://img.shields.io/badge/version-1.7.5-FF6338?style=flat-square)](docs/product/changelog.md)
 [![iOS](https://img.shields.io/badge/iOS-15%2B-0B1830?style=flat-square&logo=apple)](docs/build/ipod-installation.md)
 [![macOS](https://img.shields.io/badge/macOS-12%2B-0B1830?style=flat-square&logo=apple)](docs/build/mac-export.md)
 [![SwiftUI](https://img.shields.io/badge/UI-SwiftUI-FF6338?style=flat-square&logo=swift&logoColor=white)](docs/engineering/architecture.md)

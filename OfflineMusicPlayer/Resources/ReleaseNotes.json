@@ -1,10 +1,10 @@
 {
-  "version": "1.7.4",
+  "version": "1.7.5",
   "sections": [
     {
-      "title": "Added",
+      "title": "Changed",
       "items": [
-        "Play or shuffle an entire folder (including all nested subfolders) directly from Library \u2192 Folders and inside any folder or subfolder view."
+        "Updated the app icon, README icon, and widget brand marks to the new retro cassette logo (`docs/design/assets/casette_retro.png`)."
       ]
     }
   ]

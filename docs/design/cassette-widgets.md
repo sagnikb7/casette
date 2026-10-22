@@ -44,7 +44,7 @@ The display name is **Cassette**. The user’s exact GitHub repository spelling 
 
 App icon: `OfflineMusicPlayer/Assets.xcassets/AppIcon.appiconset/AppIcon.png`, opaque 1024×1024. Widget mark: a 64px version in both app/widget asset catalogs. Existing artwork/icon references are preserved under `docs/design/assets/`; original HTML references remain untouched.
 
-The current artwork was supplied by the designer on 13 October 2026: [original PNG](assets/retro-rainbow-cassette-original.png). It replaces the earlier ivory/coral mark. The 1254px original is preserved byte-for-byte, with its full background and framing. `sips -z 1024 1024` produces the opaque app/README icon; `sips -z 64 64` produces identical marks for app and extension. No generated alternative, recoloring or cropping is used.
+The current artwork was supplied by the user on 22 October 2026: [original PNG](assets/casette_retro.png). It replaces the earlier retro rainbow mark (`assets/retro-rainbow-cassette-original.png`), which remains preserved. The 1080px original is preserved byte-for-byte, with its full background and framing. A 1024×1024 opaque sRGB render produces the app/README icon (`AppIcon.png` and `assets/cassette-icon.png`); a 64×64 opaque sRGB render produces identical marks for app and extension (`cassette-mark.png`). No generated alternative, recoloring or cropping is used.
 
 ## Executed QA
 
